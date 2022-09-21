@@ -30,6 +30,7 @@ import Foreign.Node.FS as FS.Extra
 import Node.Path as Path
 import Node.Process as Node.Process
 import Parsing as Parsing
+import Registry.API (LegacyRegistryFile(..), Source(..))
 import Registry.API as API
 import Registry.Cache as Cache
 import Registry.Index (RegistryIndex)
@@ -101,7 +102,26 @@ main = launchAff_ do
         , registryIndex: Path.concat [ API.scratchDir, "registry-index" ]
         }
       GenerateRegistry ->
-        API.mkLocalEnv octokit cache metadataRef
+        { comment: \err -> error err
+        , closeIssue: log "Skipping GitHub issue closing, we're running locally.."
+        , commitMetadataFile: \_ _ -> do
+            log "Skipping committing to registry metadata..."
+            pure (Right unit)
+        , commitIndexFile: \_ _ -> do
+            log "Skipping committing to registry index..."
+            pure (Right unit)
+        , commitPackageSetFile: \_ _ _ -> do
+            log "Skipping committing to registry package sets..."
+            pure (Right unit)
+        , uploadPackage: Upload.upload
+        , deletePackage: Upload.delete
+        , octokit
+        , cache
+        , username: ""
+        , packagesMetadata: metadataRef
+        , registry: Path.concat [ API.scratchDir, "registry" ]
+        , registryIndex: Path.concat [ API.scratchDir, "registry-index" ]
+        }
 
   runRegistryM env do
     API.fetchRegistry
@@ -126,7 +146,7 @@ main = launchAff_ do
         Index.readRegistryIndex registryIndexPath
 
     log "Reading legacy registry..."
-    legacyRegistry <- liftAff readLegacyRegistryFiles
+    legacyRegistry <- readLegacyRegistryFiles
 
     log "Importing legacy registry packages..."
     importedIndex <- importLegacyRegistry existingRegistry legacyRegistry
@@ -166,12 +186,9 @@ main = launchAff_ do
         { newPackageLocation: manifest.location
         , packageName: manifest.name
         , newRef: Version.rawVersion manifest.version
-        -- TODO: Technically, we could produce build plans for legacy packages
-        -- by generating resolutions via Spago or Bower. We'd have to guess at
-        -- the compiler.
         , buildPlan: BuildPlan
-            { compiler: unsafeFromRight $ Version.parseVersion Version.Strict "0.15.0"
-            , resolutions: Map.empty
+            { compiler: unsafeFromRight $ Version.parseVersion Version.Strict "0.15.4"
+            , resolutions: Nothing
             }
         }
 
@@ -184,13 +201,18 @@ main = launchAff_ do
         log "----------"
         log $ "  " <> String.joinWith "\n  " (map printPackage manifests)
 
+        let
+          source = case mode of
+            UpdateRegistry -> API
+            GenerateRegistry -> Importer
+
         void $ for notPublished \(Manifest manifest) -> do
           log "\n----------"
           log "UPLOADING"
           log $ PackageName.print manifest.name <> "@" <> Version.printVersion manifest.version
           log $ show manifest.location
           log "----------"
-          API.runOperation (mkOperation manifest)
+          API.runOperation source (mkOperation manifest)
 
     when (mode == GenerateRegistry) do
       log "Regenerating registry index..."
@@ -513,23 +535,25 @@ formatVersionValidationError { error, reason } = case error of
 
 type LegacyRegistry = Map RawPackageName GitHub.PackageURL
 
--- | Read the legacy registry files stored in the root of the registry-dev.
+-- | Read the legacy registry files stored in the root of the registry repo.
 -- | Package names have their 'purescript-' prefix trimmed.
-readLegacyRegistryFiles :: Aff LegacyRegistry
+readLegacyRegistryFiles :: RegistryM LegacyRegistry
 readLegacyRegistryFiles = do
-  bowerPackages <- readLegacyRegistryFile "bower-packages.json"
-  registryPackages <- readLegacyRegistryFile "new-packages.json"
+  bowerPackages <- readLegacyRegistryFile BowerPackages
+  registryPackages <- readLegacyRegistryFile NewPackages
   let allPackages = Map.union bowerPackages registryPackages
   let fixupNames = mapKeys (RawPackageName <<< stripPureScriptPrefix)
   pure $ fixupNames allPackages
 
-readLegacyRegistryFile :: String -> Aff (Map String GitHub.PackageURL)
+readLegacyRegistryFile :: LegacyRegistryFile -> RegistryM (Map String GitHub.PackageURL)
 readLegacyRegistryFile sourceFile = do
-  legacyPackages <- Json.readJsonFile sourceFile
+  { registry } <- ask
+  let path = API.legacyRegistryFilePath registry sourceFile
+  legacyPackages <- liftAff $ Json.readJsonFile path
   case legacyPackages of
     Left err -> do
-      throwError $ Exception.error $ String.joinWith "\n"
-        [ "Decoding registry file from " <> sourceFile <> "failed:"
+      throwWithComment $ String.joinWith "\n"
+        [ "Decoding registry file from " <> path <> "failed:"
         , err
         ]
     Right packages -> pure packages
