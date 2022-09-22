@@ -1,5 +1,6 @@
 package:
   name: registry-dev
+  version: 0.0.1
   license: BSD-3-Clause
   dependencies:
   - aff
