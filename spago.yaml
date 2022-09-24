@@ -61,4 +61,5 @@ package:
   - tuples
   - uncurried-transformers
 workspace:
-  set: 0.1.1
+  set:
+    registry: 0.1.1
