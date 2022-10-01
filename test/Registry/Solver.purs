@@ -21,10 +21,10 @@ import Test.Spec.Assertions as Assert
 spec :: Spec.Spec Unit
 spec = do
   let
-    shouldSucceed goals result =
+    shouldSucceed goals result = pure unit >>= \_ ->
       solve solverIndex (Map.fromFoldable goals) `Assert.shouldContain` (Map.fromFoldable result)
 
-    shouldFail goals errors = case solve solverIndex (Map.fromFoldable goals) of
+    shouldFail goals errors = pure unit >>= \_ -> case solve solverIndex (Map.fromFoldable goals) of
       Left solverErrors -> do
         let expectedErrorCount = Array.length errors
         let receivedErrorCount = NonEmptyList.length solverErrors

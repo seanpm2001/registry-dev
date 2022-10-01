@@ -46,11 +46,11 @@ derive instance Eq SolverPosition
 instance Show SolverPosition where show = genericShow
 
 instance Semigroup SolverPosition where
+  append Trial _ = Trial
+  append _ Trial = Trial
   append SolveRoot0 _ = SolveRoot0
   append _ SolveRoot0 = SolveRoot0
   append (Solving1 r1) (Solving1 r2) = Solving1 (r1 <> r2)
-  append Trial _ = Trial
-  append _ Trial = Trial
 
 data DependencyFrom
   = DependencyFrom PackageName (Either Range Version)
@@ -107,13 +107,13 @@ derive newtype instance Show Loose
 
 upperBound :: forall r x y.
   Newtype r { lower :: x, upper :: y } =>
-  Newtype x Sourced => r -> Version
-upperBound = unwrap >>> _.lower >>> unwrap >>> \(Sourced v _) -> v
+  Newtype y Sourced => r -> Version
+upperBound = unwrap >>> _.upper >>> unwrap >>> \(Sourced v _) -> v
 
 lowerBound :: forall r x y.
   Newtype r { lower :: x, upper :: y } =>
-  Newtype y Sourced => r -> Version
-lowerBound = unwrap >>> _.upper >>> unwrap >>> \(Sourced v _) -> v
+  Newtype x Sourced => r -> Version
+lowerBound = unwrap >>> _.lower >>> unwrap >>> \(Sourced v _) -> v
 
 derive newtype instance Semigroup Loose
 
@@ -272,9 +272,9 @@ checkRequired ::
 checkRequired { registry, required: SemigroupMap required } =
   if not Map.isEmpty failed then Left failed else pure unit
   where
-  stillValid package range = not Map.isEmpty $
+  invalid package range = Map.isEmpty $
     getPackageRange registry package range
-  failed = Map.filterWithKey stillValid required
+  failed = Map.filterWithKey invalid required
 
 checkSolved ::
   { registry :: TransitivizedRegistry
@@ -289,6 +289,21 @@ checkSolved { registry, required: SemigroupMap required } =
     case Map.size filteredVersions, Map.findMax filteredVersions of
       1, Just { key: version } -> pure version
       _, _ -> Left { package, versions: filteredVersions }
+
+newtype LastSuccess b a = LastSuccess (Unit -> Either a b)
+derive instance Newtype (LastSuccess b a) _
+instance Functor (LastSuccess b) where
+  map f = over LastSuccess (map (lmap f))
+instance Apply (LastSuccess b) where
+  apply (LastSuccess mf) (LastSuccess ma) = LastSuccess \u ->
+    case ma u of
+      Right v -> Right v
+      Left a ->
+        case mf u of
+          Right v -> Right v
+          Left f -> Left (f a)
+instance Applicative (LastSuccess b) where
+  pure = LastSuccess <<< pure <<< Left
 
 solveFull ::
   { registry :: TransitivizedRegistry
@@ -306,10 +321,10 @@ solveFull = solveAux false -- true -- TODO
       Right solved -> Right solved
       Left { package, versions } ->
         let
-          sols = mapWithIndex (solvePackage r package) versions
-        in case traverse (either Right Left) sols of
-          Left solved -> Right solved
-          Right errors ->
+          sols = mapWithIndex (\version deps -> LastSuccess \_ -> solvePackage r package version deps) versions
+        in case unwrap (sequence sols) unit of
+          Right solved -> Right solved
+          Left errors ->
             let
               err = WhileSolving package (NEL.head <$> errors)
               errs = if not continue then mempty else
