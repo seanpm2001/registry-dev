@@ -2,6 +2,8 @@ module Registry.Solver where
 
 import Registry.Prelude
 
+import Control.Apply (lift2)
+import Control.Comonad (extract)
 import Control.Monad.Error.Class (catchError)
 import Control.Monad.Reader (ask)
 import Control.Monad.State (get, modify_, put)
@@ -10,20 +12,367 @@ import Data.Array as Array
 import Data.Array.NonEmpty (foldMap1)
 import Data.Array.NonEmpty as NEA
 import Data.Foldable (foldMap)
-import Data.FoldableWithIndex (foldMapWithIndex, traverseWithIndex_)
+import Data.FoldableWithIndex (allWithIndex, foldMapWithIndex, traverseWithIndex_)
+import Data.Function (on)
+import Data.Functor.App (App(..))
+import Data.FunctorWithIndex (mapWithIndex)
 import Data.Generic.Rep as Generic
+import Data.List.NonEmpty as NEL
+import Data.List.Types (List(..), NonEmptyList(..), (:))
+import Data.Map (SemigroupMap(..))
 import Data.Map as Map
-import Data.Newtype (alaF)
+import Data.Newtype (alaF, over, unwrap)
+import Data.NonEmpty (NonEmpty(..), (:|))
+import Data.Ord.Min (Min(..))
+import Data.Profunctor (dimap)
 import Data.Semigroup.First (First(..))
 import Data.Semigroup.Foldable (intercalateMap)
 import Data.Set as Set
 import Data.Set.NonEmpty (NonEmptySet)
 import Data.Set.NonEmpty as NES
+import Data.These (These(..))
+import Data.TraversableWithIndex (traverseWithIndex)
 import Registry.PackageName (PackageName)
 import Registry.PackageName as PackageName
-import Registry.Version (Range, Version, intersect, printRange, rangeIncludes)
+import Registry.Version (Range, Version, bumpPatch, intersect, printRange, rangeIncludes)
 import Registry.Version as Version
+import Safe.Coerce (coerce)
 import Uncurried.RWSE (RWSE, runRWSE)
+
+-- Prune the tree based on compiler version
+-- but compiler doesn't have ranges yet
+-- plan: https://github.com/haskell-CI/hackage-matrix-builder
+
+data SolverPositionS
+  = SolveRoot0
+  | Trial
+  | Solving1
+    { depth :: Min Int
+    , local :: Set
+      { package :: PackageName
+      , version :: Version
+      }
+    , global :: Set PackageName
+    }
+
+instance Semigroup SolverPositionS where
+  append SolveRoot0 _ = SolveRoot0
+  append _ SolveRoot0 = SolveRoot0
+  append (Solving1 r1) (Solving1 r2) = Solving1 (r1 <> r2)
+  append Trial _ = Trial
+  append _ Trial = Trial
+
+data DependencyFrom
+  = DependencyFrom PackageName (Either Range Version)
+
+data Sourced = Sourced Version SolverPositionS
+
+unSource :: Sourced -> Version
+unSource (Sourced v _) = v
+
+newtype MinSourced = MinSourced Sourced
+derive instance Newtype MinSourced _
+instance Semigroup MinSourced where
+  append a@(MinSourced (Sourced av as)) b@(MinSourced (Sourced bv bs)) =
+    case compare av bv of
+      LT -> a
+      GT -> b
+      EQ -> MinSourced (Sourced av (as <> bs))
+newtype MaxSourced = MaxSourced Sourced
+derive instance Newtype MaxSourced _
+instance Semigroup MaxSourced where
+  append a@(MaxSourced (Sourced av as)) b@(MaxSourced (Sourced bv bs)) =
+    case compare av bv of
+      GT -> a
+      LT -> b
+      EQ -> MaxSourced (Sourced av (as <> bs))
+
+newtype Intersection
+  = Intersection
+    { lower :: MaxSourced
+    , upper :: MinSourced
+    }
+derive instance Newtype Intersection _
+
+data Pref = Pref Loose | PrefLR | PrefRL
+
+{-
+interleave :: Boolean -> NonEmptyList Loose -> NonEmptyList Loose -> NonEmptyList Loose
+interleave side =
+  let
+    preference a b =
+      if side
+        then
+          case (compare `on` upperBound) a b of
+            GT -> PrefLR
+            LT -> PrefRL
+            EQ -> case (compare `on` lowerBound) a b of
+              LT -> Pref b
+              GT -> Pref a
+              EQ -> Pref $ Loose
+                { lower: prefer (flip compare) (unwrap a).lower (unwrap b).lower
+                , upper: prefer compare (unwrap a).upper (unwrap b).upper
+                }
+        else
+          case (compare `on` lowerBound) a b of
+            LT -> PrefLR
+            GT -> PrefRL
+            EQ -> case (flip compare `on` upperBound) a b of
+              GT -> Pref b
+              LT -> Pref a
+              EQ -> Pref $ Loose
+                { lower: prefer (flip compare) (unwrap a).lower (unwrap b).lower
+                , upper: prefer compare (unwrap a).upper (unwrap b).upper
+                }
+    go2 :: List Loose -> List Loose -> List Loose
+    go2 = case _, _ of
+      Nil, Nil -> Nil
+      Nil, bs -> bs
+      as, Nil -> as
+      (a : as), (b : bs) ->
+        case go (NonEmptyList (a :| as)) (NonEmptyList (b :| bs)) of
+          NonEmptyList (c :| cs) -> c : cs
+    go :: NonEmptyList Loose -> NonEmptyList Loose -> NonEmptyList Loose
+    go = case _, _ of
+      NonEmptyList (a :| as), NonEmptyList (b :| bs) ->
+        NonEmptyList case preference a b of
+          Pref h -> h :| go2 as bs
+          PrefLR -> a :| go2 as (b : bs)
+          PrefRL -> b :| go2 (a : as) bs
+  in go
+-}
+
+derive newtype instance Semigroup Intersection
+
+-- Can be treated as a simple range by outside observers
+-- but contains lower bounds for upper bounds …
+newtype Loose
+  = Loose
+    { lower :: MinSourced
+    , upper :: MaxSourced
+    }
+derive instance Newtype Loose _
+
+upperBound :: forall r x y.
+  Newtype r { lower :: x, upper :: y } =>
+  Newtype x Sourced => r -> Version
+upperBound = unwrap >>> _.lower >>> unwrap >>> \(Sourced v _) -> v
+
+lowerBound :: forall r x y.
+  Newtype r { lower :: x, upper :: y } =>
+  Newtype y Sourced => r -> Version
+lowerBound = unwrap >>> _.upper >>> unwrap >>> \(Sourced v _) -> v
+
+derive newtype instance Semigroup Loose
+
+toLoose :: Intersection -> Maybe Loose
+toLoose r | lowerBound r < upperBound r = Just (coerce r)
+toLoose _ = Nothing
+
+fromLoose :: Loose -> Intersection
+fromLoose = coerce
+
+commonalities ::
+  NonEmptyArray (Map PackageName { range :: Loose, seen :: Set Version }) ->
+  { required :: App (Map PackageName) Loose
+  , seen :: SemigroupMap PackageName (Set Version)
+  }
+commonalities = NEA.foldMap1 \deps ->
+  { required: App (deps <#> _.range)
+  , seen: SemigroupMap (deps <#> _.seen)
+  }
+
+satisfies :: forall r x y.
+  Newtype r { lower :: x, upper :: y } =>
+  Newtype x Sourced => Newtype y Sourced =>
+  Version -> r -> Boolean
+satisfies v r = v >= lowerBound r && v < upperBound r
+
+getPackageRange :: forall r x y d.
+  Newtype r { lower :: x, upper :: y } =>
+  Newtype x Sourced => Newtype y Sourced =>
+
+  SemigroupMap PackageName (SemigroupMap Version d) ->
+  PackageName -> r -> Map Version d
+getPackageRange (SemigroupMap registry) package range =
+  case Map.lookup package registry of
+    Nothing -> Map.empty
+    Just (SemigroupMap versions) ->
+      Map.filterKeys (\v -> v `satisfies` range) versions
+
+soleVersion :: Version -> Intersection
+soleVersion v = Intersection
+  { lower: MaxSourced (Sourced v Trial)
+  , upper: MinSourced (Sourced (bumpPatch v) Trial)
+  }
+
+soleVersionOf :: PackageName -> Version -> SemigroupMap PackageName Intersection
+soleVersionOf package v = SemigroupMap (Map.singleton package (soleVersion v))
+
+type TransitivizedRegistry =
+  SemigroupMap PackageName (SemigroupMap Version (SemigroupMap PackageName Intersection))
+
+-- We record what dependencies are required no matter which path we take,
+-- and what package versions we saw to explore next (which is basically the
+-- same, but not necessarily contiguous and does not get removed if
+-- one version does not have a dependency on that package)
+commonDependencies ::
+  TransitivizedRegistry ->
+  PackageName -> Intersection ->
+  SeenWith (SemigroupMap PackageName Intersection)
+commonDependencies registry package range =
+  let
+    inRange =
+      getPackageRange registry package range
+    solvableInRange =
+      Array.mapMaybe (traverse toLoose) (Array.fromFoldable inRange)
+    augment packageDep (rangeDep :: Loose) =
+      { range: rangeDep
+      , seen: Map.keys (getPackageRange registry packageDep rangeDep)
+      }
+  in case NEA.fromArray solvableInRange of
+    Nothing -> mempty
+    Just versionDependencies ->
+      case commonalities (mapWithIndex augment <<< un SemigroupMap <$> versionDependencies) of
+        { required: App reqs, seen } ->
+          Tuple seen (SemigroupMap (fromLoose <$> reqs))
+
+type Seen = SemigroupMap PackageName (Set Version)
+type SeenWith = Tuple Seen
+type SeenWithRegistry = SeenWith TransitivizedRegistry
+
+exploreTransitiveDependencies ::
+  SeenWithRegistry -> SeenWithRegistry
+exploreTransitiveDependencies (Tuple (SemigroupMap seen) registry) =
+  traverseWithIndex (traverseWithIndex <<< doTheThing) registry
+  where
+    doTheThing package version
+      | Just versions <- Map.lookup package seen
+      , Set.member version versions
+      = pure <> foldMapWithIndex (commonDependencies registry)
+      | otherwise = pure
+
+
+solveStep ::
+  { required :: SemigroupMap PackageName Intersection
+  , registry :: TransitivizedRegistry
+  , seen :: Seen
+  } ->
+  { required :: SemigroupMap PackageName Intersection
+  , registry :: TransitivizedRegistry
+  , seen :: Seen
+  }
+solveStep initial = base <> more
+  where
+  base = { required: initial.required, registry: initial.registry, seen: mempty }
+  Tuple seenHere moreRequired = initial.required
+    # foldMapWithIndex (commonDependencies initial.registry)
+  Tuple seenDeeper moreRegistry = exploreTransitiveDependencies
+    (Tuple initial.seen initial.registry)
+  more = { required: moreRequired, registry: moreRegistry, seen: seenHere <> seenDeeper }
+
+fixEq :: forall a. Eq a => (a -> a) -> (a -> a)
+fixEq f a = let b = f a in if b == a then a else fixEq f b
+
+solveSteps ::
+  { registry :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
+  , seen :: SemigroupMap PackageName (Set Version)
+  } ->
+  { registry :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
+  , seen :: SemigroupMap PackageName (Set Version)
+  }
+solveSteps a =
+  let
+    unSourceI :: Intersection -> { lower :: Version, upper :: Version }
+    unSourceI (Intersection { lower: MaxSourced (Sourced lower _), upper: MinSourced (Sourced upper _) }) =
+      { lower, upper }
+    prj ::
+      { required :: SemigroupMap PackageName Intersection
+      , registry :: TransitivizedRegistry
+      , seen :: Seen
+      } ->
+      { required :: SemigroupMap PackageName { lower :: Version, upper :: Version }
+      , registry :: SemigroupMap PackageName (SemigroupMap Version (SemigroupMap PackageName { lower :: Version, upper :: Version }))
+      , seen :: Seen
+      }
+    prj r =
+      { required: map unSourceI r.required
+      , registry: (map <<< map <<< map) unSourceI r.registry
+      , seen: r.seen
+      }
+    b = solveStep a
+  in if prj a == prj b then a else solveSteps b
+
+type NewSolverErrors = NEL.NonEmptyList NewSolverError
+data NewSolverError
+  = Conflicts (Map PackageName Intersection)
+  | WhileSolving PackageName (Map Version NewSolverError)
+
+checkRequired ::
+  { registry :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
+  } ->
+  Either (Map PackageName Intersection) Unit
+checkRequired { registry, required: SemigroupMap required } =
+  if not Map.isEmpty failed then Left failed else pure unit
+  where
+  stillValid package range = not Map.isEmpty $
+    getPackageRange registry package range
+  failed = Map.filterWithKey stillValid required
+
+checkSolved ::
+  { registry :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
+  } ->
+  Either
+    { package :: PackageName, versions :: Map Version (SemigroupMap PackageName Intersection) }
+    (Map PackageName Version)
+checkSolved { registry, required: SemigroupMap required } =
+  required # traverseWithIndex \package range ->
+    let filteredVersions = getPackageRange registry package range in
+    case Map.size filteredVersions, Map.findMax filteredVersions of
+      1, Just { key: version } -> pure version
+      _, _ -> Left { package, versions: filteredVersions }
+
+solveFull ::
+  { registry :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
+  } ->
+  Either NewSolverErrors (Map PackageName Version)
+solveFull = solveAux false -- true -- TODO
+  where
+  solveAux continue { registry, required } = do
+    let
+      r = case solveSteps { registry, required, seen: mempty } of
+        r' -> { registry: r'.registry, required: r'.required }
+    lmap (pure <<< Conflicts) (checkRequired r)
+    case checkSolved r of
+      Right solved -> Right solved
+      Left { package, versions } ->
+        let
+          sols = mapWithIndex (solvePackage r package) versions
+        in case traverse (either Right Left) sols of
+          Left solved -> Right solved
+          Right errors ->
+            let
+              err = WhileSolving package (extract <$> errors)
+              errs = if not continue then mempty else
+                case solveAux continue (package `deleteFrom` r) of
+                  Left more -> NEL.toList more
+                  Right _ -> mempty
+            in Left $ NEL.cons' err errs
+  solvePackage r package version dependencies =
+    let required = r.required <> soleVersionOf package version <> dependencies
+    in solveAux false { registry: r.registry, required }
+  deleteFrom package { registry, required } = do
+    let
+      deleter :: forall v. SemigroupMap PackageName v -> SemigroupMap PackageName v
+      deleter = over SemigroupMap (Map.delete package)
+    { required: deleter required
+    , registry: map deleter <$> deleter registry
+    }
 
 type Dependencies = Map PackageName (Map Version (Map PackageName Range))
 
