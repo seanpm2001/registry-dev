@@ -96,52 +96,6 @@ derive instance Newtype Intersection _
 
 data Pref = Pref Loose | PrefLR | PrefRL
 
-{-
-interleave :: Boolean -> NonEmptyList Loose -> NonEmptyList Loose -> NonEmptyList Loose
-interleave side =
-  let
-    preference a b =
-      if side
-        then
-          case (compare `on` upperBound) a b of
-            GT -> PrefLR
-            LT -> PrefRL
-            EQ -> case (compare `on` lowerBound) a b of
-              LT -> Pref b
-              GT -> Pref a
-              EQ -> Pref $ Loose
-                { lower: prefer (flip compare) (unwrap a).lower (unwrap b).lower
-                , upper: prefer compare (unwrap a).upper (unwrap b).upper
-                }
-        else
-          case (compare `on` lowerBound) a b of
-            LT -> PrefLR
-            GT -> PrefRL
-            EQ -> case (flip compare `on` upperBound) a b of
-              GT -> Pref b
-              LT -> Pref a
-              EQ -> Pref $ Loose
-                { lower: prefer (flip compare) (unwrap a).lower (unwrap b).lower
-                , upper: prefer compare (unwrap a).upper (unwrap b).upper
-                }
-    go2 :: List Loose -> List Loose -> List Loose
-    go2 = case _, _ of
-      Nil, Nil -> Nil
-      Nil, bs -> bs
-      as, Nil -> as
-      (a : as), (b : bs) ->
-        case go (NonEmptyList (a :| as)) (NonEmptyList (b :| bs)) of
-          NonEmptyList (c :| cs) -> c : cs
-    go :: NonEmptyList Loose -> NonEmptyList Loose -> NonEmptyList Loose
-    go = case _, _ of
-      NonEmptyList (a :| as), NonEmptyList (b :| bs) ->
-        NonEmptyList case preference a b of
-          Pref h -> h :| go2 as bs
-          PrefLR -> a :| go2 as (b : bs)
-          PrefRL -> b :| go2 (a : as) bs
-  in go
--}
-
 derive newtype instance Semigroup Intersection
 
 -- Can be treated as a simple range by outside observers
