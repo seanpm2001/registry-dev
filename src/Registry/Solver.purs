@@ -16,6 +16,7 @@ import Data.Map as Map
 import Data.Newtype (over, unwrap, wrap)
 import Data.Ord.Min (Min)
 import Data.Semigroup.Foldable (intercalateMap)
+import Data.Semigroup.Generic (genericAppend)
 import Data.Set as Set
 import Data.Set.NonEmpty (NonEmptySet)
 import Data.Set.NonEmpty as NES
@@ -30,27 +31,35 @@ import Safe.Coerce (coerce)
 -- but compiler doesn't have ranges yet
 -- plan: https://github.com/haskell-CI/hackage-matrix-builder
 
-data SolverPosition
-  = SolveRoot0
-  | Trial
-  | Solving1
-    { depth :: Min Int
-    , local :: NonEmptySet
+data LocalSolverPosition
+  = Trial
+  | Root
+  | Solving
+    (NonEmptySet
       { package :: PackageName
       , version :: Version
       }
-    , global :: Set PackageName
-    }
+    )
+derive instance Generic LocalSolverPosition _
+derive instance Eq LocalSolverPosition
+instance Show LocalSolverPosition where show = genericShow
+
+instance Semigroup LocalSolverPosition where
+  append Trial _ = Trial
+  append _ Trial = Trial
+  append Root _ = Root
+  append _ Root = Root
+  append (Solving r1) (Solving r2) = Solving (r1 <> r2)
+
+data SolverPosition = Pos LocalSolverPosition (Set PackageName)
 derive instance Generic SolverPosition _
 derive instance Eq SolverPosition
 instance Show SolverPosition where show = genericShow
 
-instance Semigroup SolverPosition where
-  append Trial _ = Trial
-  append _ Trial = Trial
-  append SolveRoot0 _ = SolveRoot0
-  append _ SolveRoot0 = SolveRoot0
-  append (Solving1 r1) (Solving1 r2) = Solving1 (r1 <> r2)
+instance Semigroup SolverPosition where append = genericAppend
+
+dependencyOf :: SolverPosition -> SolverPosition -> SolverPosition
+dependencyOf (Pos _ g1) (Pos l2 g2) = Pos l2 (g1 <> g2)
 
 data DependencyFrom
   = DependencyFrom PackageName (Either Range Version)
@@ -154,8 +163,8 @@ getPackageRange (SemigroupMap registry) package range =
 
 soleVersion :: Version -> Intersection
 soleVersion v = Intersection
-  { lower: MaxSourced (Sourced v Trial)
-  , upper: MinSourced (Sourced (bumpPatch v) Trial)
+  { lower: MaxSourced (Sourced v (Pos Trial Set.empty))
+  , upper: MinSourced (Sourced (bumpPatch v) (Pos Trial Set.empty))
   }
 
 soleVersionOf :: PackageName -> Version -> SemigroupMap PackageName Intersection
@@ -347,13 +356,21 @@ type Dependencies = Map PackageName (Map Version (Map PackageName Range))
 
 printSolverPosition :: SolverPosition -> String
 printSolverPosition = case _ of
-  SolveRoot0 -> " (declared dependency)"
-  Trial -> " (attempted version)"
-  Solving1 { global, local } ->
-    " seen in " <> intercalateMap ", " show local
+  Pos Root _ -> " (declared dependency)"
+  Pos Trial _ -> " (attempted version)"
+  Pos (Solving local) global ->
+    " seen in " <> intercalateMap ", " printPackageVersion local
     <> case NEA.fromFoldable global of
       Nothing -> mempty
       Just as -> " from declared dependencies " <> intercalateMap ", " show as
+
+printPackageVersion ::
+  { package :: PackageName
+  , version :: Version
+  }
+  -> String
+printPackageVersion { package, version } =
+  PackageName.print package <> "@" <> Version.printVersion version
 
 derive instance Generic.Generic SolverError _
 instance Show SolverError where show a = genericShow a
@@ -390,16 +407,16 @@ printConflict :: String -> PackageName -> Intersection -> String
 printConflict indent package range | lowerBound range >= upperBound range = Array.fold
   [ "Conflict in version ranges for "
   , PackageName.print package
-  , ":\n"
-  , indent, "  >=", printSourced (unwrap range).lower
-  , indent, "  <",  printSourced (unwrap range).upper
+  , ":"
+  , "\n", indent, "  >=", printSourced (unwrap range).lower
+  , "\n", indent, "  <",  printSourced (unwrap range).upper
   ]
 printConflict indent package range = Array.fold
   [ "No versions found in the registry for "
   , PackageName.print package
-  , " in range\n"
-  , indent, "  >=", printSourced (unwrap range).lower
-  , indent, "  <",  printSourced (unwrap range).upper
+  , " in range"
+  , "\n", indent, "  >=", printSourced (unwrap range).lower
+  , "\n", indent, "  <",  printSourced (unwrap range).upper
   ]
 
 {-
@@ -421,20 +438,16 @@ validate index sols = maybe (Right unit) Left $ NEA.fromArray
 intersectionFromRange :: PackageName -> Version -> Range -> Intersection
 intersectionFromRange package version range =
   let
-    mkSourced v = Sourced v $ Solving1
-      { depth: wrap 1
-      , local: NES.singleton { package, version }
-      , global: Set.empty
-      }
+    mkSourced v = Sourced v $ Pos (Solving (NES.singleton { package, version })) Set.empty
   in Intersection
     { lower: wrap $ mkSourced (Version.greaterThanOrEq range)
     , upper: wrap $ mkSourced (Version.lessThan range)
     }
 
-intersectionFromRange' :: Range -> Intersection
-intersectionFromRange' range =
+intersectionFromRange' :: PackageName -> Range -> Intersection
+intersectionFromRange' package range =
   let
-    mkSourced v = Sourced v SolveRoot0
+    mkSourced v = Sourced v (Pos Root (Set.singleton package))
   in Intersection
     { lower: wrap $ mkSourced (Version.greaterThanOrEq range)
     , upper: wrap $ mkSourced (Version.lessThan range)
@@ -444,7 +457,7 @@ solve :: Dependencies -> Map PackageName Range -> Either (NEL.NonEmptyList Solve
 solve index pending =
   let
     registry = mapWithIndex (\package -> mapWithIndex \version -> map (intersectionFromRange package version)) $ coerce index
-    required = map intersectionFromRange' $ coerce pending
+    required = mapWithIndex intersectionFromRange' $ coerce pending
   in case solveFull { registry, required } of
     Left e -> Left e
     Right r -> Right r

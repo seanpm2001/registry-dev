@@ -8,11 +8,13 @@ import Data.Array as Array
 import Data.Array.NonEmpty as NonEmptyArray
 import Data.List.NonEmpty as NonEmptyList
 import Data.Map as Map
+import Data.Newtype (wrap)
+import Data.Semigroup.Foldable (intercalateMap)
 import Data.Set as Set
 import Data.Set.NonEmpty as NES
 import Registry.PackageName (PackageName)
 import Registry.PackageName as PackageName
-import Registry.Solver (SolverError(..), SolverPosition(..), printSolverError, solve)
+import Registry.Solver (Intersection(..), LocalSolverPosition(..), SolverError(..), SolverPosition(..), Sourced(..), printSolverError, solve)
 import Registry.Version (ParseMode(..), Range, Version)
 import Registry.Version as Version
 import Test.Spec as Spec
@@ -30,7 +32,9 @@ spec = do
         let receivedErrorCount = NonEmptyList.length solverErrors
 
         when (expectedErrorCount /= receivedErrorCount) do
-          Assert.fail $ "Tests expect " <> show expectedErrorCount <> " errors, but received " <> show receivedErrorCount
+          if expectedErrorCount == 0
+            then Assert.fail $ "Error(s): " <> show ((\e -> { error: e, message: printSolverError e }) <$> Array.fromFoldable solverErrors) <> "\n" <> intercalateMap "\n" printSolverError solverErrors
+            else Assert.fail $ "Tests expect " <> show expectedErrorCount <> " errors, but received " <> show receivedErrorCount
 
         let receivedErrors = map (\error -> { error, message: printSolverError error }) solverErrors
         let combinedErrors = Array.zip errors (Array.fromFoldable receivedErrors)
@@ -113,20 +117,27 @@ spec = do
     Spec.it "No versions available for target package" do
       shouldFail
         [ package "does-not-exist" /\ range 0 4 ]
-        [
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "does-not-exist" `Tuple` range' 0 (solveRoot "does-not-exist") 4 (solveRoot "does-not-exist") ]
+          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 (declared dependency)\n  <4.0.0 (declared dependency)"
+          }
         ]
 
     Spec.it "Target package has versions, but none in range" do
       shouldFail
         [ prelude.package /\ range 20 50 ]
-        [
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "prelude" `Tuple` range' 20 (solveRoot "prelude") 50 (solveRoot "prelude") ]
+          , message: "No versions found in the registry for prelude in range\n  >=20.0.0 (declared dependency)\n  <50.0.0 (declared dependency)"
+          }
         ]
 
     Spec.it "Direct dependency of target package has no versions in range." do
       shouldFail
         [ brokenFixed.package /\ range 0 1 ]
-        [ {- error: NoVersionsInRange (package "does-not-exist") Set.empty (range 0 4) (Solving brokenFixed.package (pure (version 0)) SolveRoot)
-          , message: "Package index contained no versions for does-not-exist in the range >=0.0.0 <4.0.0 (existing versions: none) while solving broken-fixed@0.0.0"
+        [ {- error: Conflicts $ Map.fromFoldable
+            [ package "does-not-exist" `Tuple` range' 0 SolveRoot0 4 SolveRoot0 ]
+          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 (declared dependency)\n  <4.0.0 (declared dependency)"
           -}
         ]
 
@@ -288,3 +299,11 @@ range lower upper = unsafeFromRight $ Version.parseRange Strict $ Array.fold
   , show upper
   , ".0.0"
   ]
+
+range' :: Int -> SolverPosition -> Int -> SolverPosition -> Intersection
+range' lower lowerPos upper upperPos = Intersection
+  { lower: wrap $ Sourced (version lower) lowerPos
+  , upper: wrap $ Sourced (version upper) upperPos
+  }
+
+solveRoot = Pos Root <<< Set.singleton <<< package
