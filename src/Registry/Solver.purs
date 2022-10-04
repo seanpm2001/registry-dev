@@ -14,7 +14,6 @@ import Data.List.NonEmpty as NEL
 import Data.Map (SemigroupMap(..))
 import Data.Map as Map
 import Data.Newtype (over, unwrap, wrap)
-import Data.Ord.Min (Min)
 import Data.Semigroup.Foldable (intercalateMap)
 import Data.Semigroup.Generic (genericAppend)
 import Data.Set as Set
@@ -58,8 +57,20 @@ instance Show SolverPosition where show = genericShow
 
 instance Semigroup SolverPosition where append = genericAppend
 
-dependencyOf :: SolverPosition -> SolverPosition -> SolverPosition
-dependencyOf (Pos _ g1) (Pos l2 g2) = Pos l2 (g1 <> g2)
+dependency :: SolverPosition -> SolverPosition -> SolverPosition
+dependency (Pos _ g1) (Pos l2 g2) = Pos l2 (g1 <> g2)
+
+dependencyOf :: forall z. Newtype z Sourced => SolverPosition -> z -> z
+dependencyOf p1 = coerce \(Sourced v p2) ->
+  Sourced v (dependency p1 p2)
+
+asDependencyOf :: Intersection -> Intersection -> Intersection
+asDependencyOf (Intersection i1) (Intersection i2) =
+  let pos = getPos i1.lower <> getPos i1.upper
+  in Intersection
+    { lower: dependencyOf pos i2.lower
+    , upper: dependencyOf pos i2.upper
+    }
 
 data DependencyFrom
   = DependencyFrom PackageName (Either Range Version)
@@ -123,6 +134,9 @@ lowerBound :: forall r x y.
   Newtype r { lower :: x, upper :: y } =>
   Newtype x Sourced => r -> Version
 lowerBound = unwrap >>> _.lower >>> unwrap >>> \(Sourced v _) -> v
+
+getPos :: forall z. Newtype z Sourced => z -> SolverPosition
+getPos = unwrap >>> \(Sourced _ pos) -> pos
 
 derive newtype instance Semigroup Loose
 
@@ -196,7 +210,7 @@ commonDependencies registry package range =
     Just versionDependencies ->
       case commonalities (mapWithIndex augment <<< un SemigroupMap <$> versionDependencies) of
         { required: App reqs, seen } ->
-          Tuple seen (SemigroupMap (fromLoose <$> reqs))
+          Tuple seen (SemigroupMap (asDependencyOf range <<< fromLoose <$> reqs))
 
 type Seen = SemigroupMap PackageName (Set Version)
 type SeenWith = Tuple Seen
@@ -319,7 +333,7 @@ solveFull ::
   , required :: SemigroupMap PackageName Intersection
   } ->
   Either SolverErrors (Map PackageName Version)
-solveFull = solveAux false -- true -- TODO
+solveFull = solveAux true
   where
   solveAux continue { registry, required } = do
     let
@@ -360,7 +374,7 @@ printSolverPosition = case _ of
   Pos Trial _ -> " (attempted version)"
   Pos (Solving local) global ->
     " seen in " <> intercalateMap ", " printPackageVersion local
-    <> case NEA.fromFoldable global of
+    <> case NEA.fromFoldable (Set.difference global (Set.map _.package (NES.toSet local))) of
       Nothing -> mempty
       Just as -> " from declared dependencies " <> intercalateMap ", " show as
 

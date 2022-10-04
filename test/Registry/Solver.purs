@@ -5,7 +5,6 @@ module Test.Registry.Solver
 import Registry.Prelude
 
 import Data.Array as Array
-import Data.Array.NonEmpty as NonEmptyArray
 import Data.List.NonEmpty as NonEmptyList
 import Data.Map as Map
 import Data.Newtype (wrap)
@@ -118,7 +117,7 @@ spec = do
       shouldFail
         [ package "does-not-exist" /\ range 0 4 ]
         [ { error: Conflicts $ Map.fromFoldable
-            [ package "does-not-exist" `Tuple` range' 0 (solveRoot "does-not-exist") 4 (solveRoot "does-not-exist") ]
+            [ package "does-not-exist" `Tuple` intersection 0 (solveRoot "does-not-exist") 4 (solveRoot "does-not-exist") ]
           , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 (declared dependency)\n  <4.0.0 (declared dependency)"
           }
         ]
@@ -127,7 +126,7 @@ spec = do
       shouldFail
         [ prelude.package /\ range 20 50 ]
         [ { error: Conflicts $ Map.fromFoldable
-            [ package "prelude" `Tuple` range' 20 (solveRoot "prelude") 50 (solveRoot "prelude") ]
+            [ package "prelude" `Tuple` intersection 20 (solveRoot "prelude") 50 (solveRoot "prelude") ]
           , message: "No versions found in the registry for prelude in range\n  >=20.0.0 (declared dependency)\n  <50.0.0 (declared dependency)"
           }
         ]
@@ -135,27 +134,32 @@ spec = do
     Spec.it "Direct dependency of target package has no versions in range." do
       shouldFail
         [ brokenFixed.package /\ range 0 1 ]
-        [ {- error: Conflicts $ Map.fromFoldable
-            [ package "does-not-exist" `Tuple` range' 0 SolveRoot0 4 SolveRoot0 ]
-          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 (declared dependency)\n  <4.0.0 (declared dependency)"
-          -}
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "does-not-exist" `Tuple` intersection 0 (via' "broken-fixed" 0) 4 (via' "broken-fixed" 0)
+            ]
+          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 seen in broken-fixed@0.0.0\n  <4.0.0 seen in broken-fixed@0.0.0"
+          }
         ]
 
     Spec.it "Nested dependency of target package has no versions in range." do
       shouldFail
         [ transitiveBroken.package /\ range 0 1 ]
-        [ {- error: NoVersionsInRange (package "does-not-exist") Set.empty (range 0 5) (Solving fixedBroken.package (pure (version 2)) (Solving transitiveBroken.package (pure (version 0)) SolveRoot))
-          , message: "Package index contained no versions for does-not-exist in the range >=0.0.0 <5.0.0 (existing versions: none) while solving fixed-broken@2.0.0 while solving transitive-broken@0.0.0"
-          -}
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "does-not-exist" `Tuple` intersection 0 (via "fixed-broken" 2 ["transitive-broken"]) 5 (via "fixed-broken" 2 ["transitive-broken"])
+            ]
+          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 seen in fixed-broken@2.0.0 from declared dependencies transitive-broken\n  <5.0.0 seen in fixed-broken@2.0.0 from declared dependencies transitive-broken"
+          }
         ]
 
   Spec.describe "Does not solve when ranges do not intersect" do
     Spec.it "Simple disjoint ranges" do
       shouldFail
         [ simple.package /\ range 0 1, prelude.package /\ range 1 2 ]
-        [ {- error: VersionNotInRange prelude.package (NES.singleton (version 1)) (range 0 1) (Solving simple.package (pure (version 0)) SolveRoot)
-          , message: "Committed to prelude@1.0.0 but the range >=0.0.0 <1.0.0 was also required while solving simple@0.0.0"
-          -}
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "prelude" `Tuple` intersection 1 (solveRoot "prelude") 1 (via' "simple" 0)
+            ]
+          , message: "Conflict in version ranges for prelude:\n  >=1.0.0 (declared dependency)\n  <1.0.0 seen in simple@0.0.0"
+          }
         ]
 
     -- only-simple depends on simple@0, which is incompatible with the prelude
@@ -165,18 +169,22 @@ spec = do
         [ onlySimple.package /\ range 0 4
         , prelude.package /\ range 1 2
         ]
-        [ {- error: VersionNotInRange prelude.package (NES.singleton (version 1)) (range 0 1) (Solving simple.package (pure (version 0)) (Solving onlySimple.package (pure (version 0)) SolveRoot))
-          , message: "Committed to prelude@1.0.0 but the range >=0.0.0 <1.0.0 was also required while solving simple@0.0.0 while solving only-simple@0.0.0"
-          -}
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "prelude" `Tuple` intersection 1 (solveRoot "prelude") 1 (via "simple" 0 ["only-simple"])
+            ]
+          , message: "Conflict in version ranges for prelude:\n  >=1.0.0 (declared dependency)\n  <1.0.0 seen in simple@0.0.0 from declared dependencies only-simple"
+          }
         ]
 
   Spec.describe "Reports multiple errors" do
     Spec.it "Fails when target package cannot be satisfied" do
       shouldFail
         [ brokenBroken.package /\ range 0 2 ]
-        [ {- error: NoVersionsInRange (package "does-not-exist") Set.empty (range 0 5) (Solving brokenBroken.package (pure (version 1) <|> pure (version 0)) SolveRoot)
-          , message: "Package index contained no versions for does-not-exist in the range >=0.0.0 <5.0.0 (existing versions: none) while solving broken-broken@1.0.0, 0.0.0"
-          -}
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "does-not-exist" `Tuple` intersection 0 (via' "broken-broken" 0 <> via' "broken-broken" 1) 5 (via' "broken-broken" 0 <> via' "broken-broken" 1)
+            ]
+          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 seen in broken-broken@0.0.0, broken-broken@1.0.0\n  <5.0.0 seen in broken-broken@0.0.0, broken-broken@1.0.0"
+          }
         ]
 
     Spec.it "Fails on disjoint ranges" do
@@ -184,12 +192,10 @@ spec = do
         [ brokenFixed.package /\ range 0 1
         , fixedBroken.package /\ range 2 3
         ]
-        [ {- error: NoVersionsInRange (package "does-not-exist") Set.empty (range 0 4) (Solving brokenFixed.package (pure (version 0)) SolveRoot)
-          , message: "Package index contained no versions for does-not-exist in the range >=0.0.0 <4.0.0 (existing versions: none) while solving broken-fixed@0.0.0"
-          }
-        , { error: NoVersionsInRange (package "does-not-exist") Set.empty (range 0 5) (Solving fixedBroken.package (pure (version 2)) SolveRoot)
-          , message: "Package index contained no versions for does-not-exist in the range >=0.0.0 <5.0.0 (existing versions: none) while solving fixed-broken@2.0.0"
-          -}
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "does-not-exist" `Tuple` intersection 0 (via' "broken-fixed" 0 <> via' "fixed-broken" 2) 4 (via' "broken-fixed" 0)
+            ]
+          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 seen in broken-fixed@0.0.0, fixed-broken@2.0.0\n  <4.0.0 seen in broken-fixed@0.0.0" }
         ]
 
 solverIndex :: Map PackageName (Map Version (Map PackageName Range))
@@ -300,10 +306,17 @@ range lower upper = unsafeFromRight $ Version.parseRange Strict $ Array.fold
   , ".0.0"
   ]
 
-range' :: Int -> SolverPosition -> Int -> SolverPosition -> Intersection
-range' lower lowerPos upper upperPos = Intersection
+intersection :: Int -> SolverPosition -> Int -> SolverPosition -> Intersection
+intersection lower lowerPos upper upperPos = Intersection
   { lower: wrap $ Sourced (version lower) lowerPos
   , upper: wrap $ Sourced (version upper) upperPos
   }
 
+solveRoot :: String -> SolverPosition
 solveRoot = Pos Root <<< Set.singleton <<< package
+
+via :: String -> Int -> Array String -> SolverPosition
+via p v = Pos (Solving (NES.singleton { package: package p, version: version v })) <<< Set.fromFoldable <<< map package
+
+via' :: String -> Int -> SolverPosition
+via' p v = Pos (Solving (NES.singleton { package: package p, version: version v })) (Set.singleton (package p))
