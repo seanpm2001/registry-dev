@@ -333,7 +333,7 @@ solveFull ::
   , required :: SemigroupMap PackageName Intersection
   } ->
   Either SolverErrors (Map PackageName Version)
-solveFull = solveAux true
+solveFull = solveAux false
   where
   solveAux continue { registry, required } = do
     let

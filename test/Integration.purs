@@ -7,12 +7,12 @@ import Registry.Prelude
 import Control.Monad.Except as Except
 import Control.Monad.State as State
 import Data.Array as Array
-import Data.Array.NonEmpty as NEA
 import Data.Map as Map
 import Data.String as String
 import Effect.Exception as Exception
 import Foreign.Git as Git
 import Foreign.Tmp as Tmp
+import Node.ChildProcess as NodeProcess
 import Node.Path as Path
 import Registry.Index (RegistryIndex)
 import Registry.Index as Index
@@ -24,15 +24,14 @@ import Registry.Scripts.BowerInstaller (BowerSolved)
 import Registry.Solver as Solver
 import Registry.Version (Range, Version)
 import Registry.Version as Version
+import Sunde as Process
 import Test.Spec as Spec
 import Test.Spec.Assertions as Assert
 import Test.Spec.Reporter (consoleReporter)
 import Test.Spec.Runner (defaultConfig, runSpec')
 
 main :: Effect Unit
-main = pure unit
-{-
-launchAff_ do
+main = launchAff_ do
   { solverIndex, solutions } <- setup
 
   runSpec' defaultConfig [ consoleReporter ] do
@@ -82,7 +81,8 @@ setup = do
 
   result <- withBackoff' $ Except.runExceptT do
     log "Fetching registry index..."
-    Git.runGit_ [ "clone", "https://github.com/purescript/registry-index", "--depth", "1" ] (Just tmp)
+    Git.runGit_ [ "clone", "https://github.com/purescript/registry-index", "--depth", "100" ] (Just tmp)
+    void $ lift $ Process.spawn { cmd: "bash", args: [ "-c", "cd registry-index && git checkout e7346e906d7bb93ed98e7f4c43349ed01b8398ed" ], stdin: Nothing } (NodeProcess.defaultSpawnOptions { cwd = Just tmp })
     log "Fetching bower solutions..."
     Git.runGit_ [ "clone", "https://github.com/thomashoneyman/bower-solver-results", "--depth", "1" ] (Just tmp)
 
@@ -97,6 +97,8 @@ setup = do
   -- corresponding Bower solution.
   log "Segmenting solvable package versions by owner..."
   segmentedIndex <- segmentSolvableByOwner index $ Path.concat [ tmp, "bower-solver-results" ]
+
+  log "Doing tests …"
 
   let
     solverIndex :: Solver.Dependencies
@@ -127,7 +129,8 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
     let
       name = PackageName.print package <> "@" <> Version.printVersion version
       isNoVersionsError = case _ of
-        Solver.NoVersionsInRange _ _ _ _ -> true
+        Solver.Conflicts es ->
+          es # any \i -> Solver.upperBound i > Solver.lowerBound i
         _ -> false
 
     case Solver.solve solverIndex dependencies of
@@ -135,10 +138,10 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
       -- the index, then we either restricted our ranges too much or the
       -- problem is that our index has fewer versions than Bower's. In the
       -- interest of useful tests, we assume the latter.
-      Left errs | NEA.any isNoVersionsError errs -> pure unit
+      Left errs | any isNoVersionsError errs -> pure unit
       -- Otherwise, we failed to find a solution and failed the test.
       Left errs -> do
-        let printedErrs = String.joinWith "\n" $ NEA.toArray $ map Solver.printSolverError errs
+        let printedErrs = String.joinWith "\n" $ Array.fromFoldable $ map Solver.printSolverError errs
         Assert.fail $ String.joinWith "\n----------\n"
           [ name
           , printedErrs
@@ -148,4 +151,3 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
       -- TODO: We can also check that our solution produces versions as
       -- high as those produced by Bower, if we want.
       Right _ -> pure unit
--}
