@@ -216,6 +216,27 @@ spec = do
           }
         ]
 
+    -- since we try packages in alphabetical order
+    Spec.it "Reports different errors for different versions (converse)" do
+      shouldFail
+        [ qaotic.package /\ range 1 3
+        , prelude.package /\ range 2 4
+        ]
+        [ { error: WhileSolving (package "prelude") $ Map.fromFoldable $
+            [2, 3] <#> \v -> Tuple (version v) $
+              WhileSolving (package "qaotic") $ Map.fromFoldable
+                [ Tuple (version 1) $ Conflicts $ Map.fromFoldable
+                  [ package "prelude" `Tuple` intersection v ((if v == 2 then committed else committed') "prelude") 1 (via' "qaotic" 1)
+                  ]
+                , Tuple (version 2) $ Conflicts $ Map.fromFoldable
+                  -- TODO: why no global "prelude" here?
+                  [ package "prelude" `Tuple` intersection' 5 (via "qaotic" 2 []) v (committed' "prelude")
+                  ]
+                ]
+          , message: "While solving prelude each version could not be solved:\n- 2.0.0: \n  While solving qaotic each version could not be solved:\n  - 1.0.0: \n    Conflict in version ranges for prelude:\n      >=2.0.0 (attempted version)\n      <1.0.0 seen in qaotic@1.0.0\n  - 2.0.0: \n    Conflict in version ranges for prelude:\n      >=5.0.0 seen in qaotic@2.0.0\n      <2.0.1 (attempted version)\n- 3.0.0: \n  While solving qaotic each version could not be solved:\n  - 1.0.0: \n    Conflict in version ranges for prelude:\n      >=3.0.0 (attempted version)\n      <1.0.0 seen in qaotic@1.0.0\n  - 2.0.0: \n    Conflict in version ranges for prelude:\n      >=5.0.0 seen in qaotic@2.0.0\n      <3.0.1 (attempted version)"
+          }
+        ]
+
 solverIndex :: Map PackageName (Map Version (Map PackageName Range))
 solverIndex = Map.fromFoldable $ map buildPkg
   -- simple and prelude have corresponding versions 0.0.0 and 1.0.0
@@ -231,6 +252,7 @@ solverIndex = Map.fromFoldable $ map buildPkg
   , transitiveBroken
   -- packages with non-contiguous dependency ranges
   , chaotic
+  , qaotic
   ]
   where
   buildPkg pkg = Tuple pkg.package (map buildVersion pkg.versions)
@@ -321,6 +343,15 @@ chaotic =
       ]
   }
 
+qaotic :: TestPackage
+qaotic =
+  { package: package "qaotic"
+  , versions: Map.fromFoldable
+      [ version 1 /\ Just (prelude.package /\ range 0 1)
+      , version 2 /\ Just (prelude.package /\ range 5 6)
+      ]
+  }
+
 package :: String -> PackageName
 package = unsafeFromRight <<< PackageName.parse
 
@@ -345,8 +376,20 @@ intersection lower lowerPos upper upperPos = Intersection
   , upper: wrap $ Sourced (version upper) upperPos
   }
 
+intersection' :: Int -> SolverPosition -> Int -> SolverPosition -> Intersection
+intersection' lower lowerPos upper upperPos = Intersection
+  { lower: wrap $ Sourced (version lower) lowerPos
+  , upper: wrap $ Sourced (Version.bumpPatch (version upper)) upperPos
+  }
+
 solveRoot :: String -> SolverPosition
 solveRoot = Pos Root <<< Set.singleton <<< package
+
+committed :: String -> SolverPosition
+committed = Pos Trial <<< Set.singleton <<< package
+
+committed' :: String -> SolverPosition
+committed' = const $ Pos Trial Set.empty
 
 via :: String -> Int -> Array String -> SolverPosition
 via p v = Pos (Solving (NES.singleton { package: package p, version: version v })) <<< Set.fromFoldable <<< map package
