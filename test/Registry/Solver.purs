@@ -151,6 +151,16 @@ spec = do
           }
         ]
 
+    Spec.it "Fails when target package cannot be satisfied" do
+      shouldFail
+        [ brokenBroken.package /\ range 0 2 ]
+        [ { error: Conflicts $ Map.fromFoldable
+            [ package "does-not-exist" `Tuple` intersection 0 (via' "broken-broken" 0 <> via' "broken-broken" 1) 5 (via' "broken-broken" 0 <> via' "broken-broken" 1)
+            ]
+          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 seen in broken-broken@0.0.0, broken-broken@1.0.0\n  <5.0.0 seen in broken-broken@0.0.0, broken-broken@1.0.0"
+          }
+        ]
+
   Spec.describe "Does not solve when ranges do not intersect" do
     Spec.it "Simple disjoint ranges" do
       shouldFail
@@ -176,17 +186,6 @@ spec = do
           }
         ]
 
-  Spec.describe "Reports multiple errors" do
-    Spec.it "Fails when target package cannot be satisfied" do
-      shouldFail
-        [ brokenBroken.package /\ range 0 2 ]
-        [ { error: Conflicts $ Map.fromFoldable
-            [ package "does-not-exist" `Tuple` intersection 0 (via' "broken-broken" 0 <> via' "broken-broken" 1) 5 (via' "broken-broken" 0 <> via' "broken-broken" 1)
-            ]
-          , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 seen in broken-broken@0.0.0, broken-broken@1.0.0\n  <5.0.0 seen in broken-broken@0.0.0, broken-broken@1.0.0"
-          }
-        ]
-
     Spec.it "Fails on disjoint ranges" do
       shouldFail
         [ brokenFixed.package /\ range 0 1
@@ -196,6 +195,25 @@ spec = do
             [ package "does-not-exist" `Tuple` intersection 0 (via' "broken-fixed" 0 <> via' "fixed-broken" 2) 4 (via' "broken-fixed" 0)
             ]
           , message: "No versions found in the registry for does-not-exist in range\n  >=0.0.0 seen in broken-fixed@0.0.0, fixed-broken@2.0.0\n  <4.0.0 seen in broken-fixed@0.0.0" }
+        ]
+
+  Spec.describe "Reports multiple errors" do
+    Spec.it "Reports different errors for different versions" do
+      shouldFail
+        [ chaotic.package /\ range 1 3
+        , prelude.package /\ range 2 4
+        ]
+        [ { error: WhileSolving (package "chaotic") $ Map.fromFoldable
+            [ Tuple (version 1) $ Conflicts $ Map.fromFoldable
+              [ package "prelude" `Tuple` intersection 2 (solveRoot "prelude") 1 (via' "chaotic" 1)
+              ]
+            , Tuple (version 2) $ Conflicts $ Map.fromFoldable
+              -- TODO: why no global "chaotic" here?
+              [ package "prelude" `Tuple` intersection 5 (via "chaotic" 2 []) 4 (solveRoot "prelude")
+              ]
+            ]
+          , message: "While solving chaotic each version could not be solved:\n- 1.0.0: \n  Conflict in version ranges for prelude:\n    >=2.0.0 (declared dependency)\n    <1.0.0 seen in chaotic@1.0.0\n- 2.0.0: \n  Conflict in version ranges for prelude:\n    >=5.0.0 seen in chaotic@2.0.0\n    <4.0.0 (declared dependency)"
+          }
         ]
 
 solverIndex :: Map PackageName (Map Version (Map PackageName Range))
@@ -211,6 +229,8 @@ solverIndex = Map.fromFoldable $ map buildPkg
   -- packages that are broken at all versions
   , brokenBroken
   , transitiveBroken
+  -- packages with non-contiguous dependency ranges
+  , chaotic
   ]
   where
   buildPkg pkg = Tuple pkg.package (map buildVersion pkg.versions)
@@ -285,6 +305,19 @@ prelude =
   , versions: Map.fromFoldable
       [ version 0 /\ Nothing
       , version 1 /\ Nothing
+      , version 2 /\ Nothing
+      , version 3 /\ Nothing
+      , version 4 /\ Nothing
+      , version 5 /\ Nothing
+      ]
+  }
+
+chaotic :: TestPackage
+chaotic =
+  { package: package "chaotic"
+  , versions: Map.fromFoldable
+      [ version 1 /\ Just (prelude.package /\ range 0 1)
+      , version 2 /\ Just (prelude.package /\ range 5 6)
       ]
   }
 
