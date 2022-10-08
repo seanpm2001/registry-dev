@@ -20,6 +20,7 @@
   , "exceptions"
   , "filterable"
   , "foldable-traversable"
+  , "foreign"
   , "foreign-object"
   , "formatters"
   , "functions"
@@ -58,6 +59,7 @@
   , "transformers"
   , "tuples"
   , "uncurried-transformers"
+  , "unsafe-coerce"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]
