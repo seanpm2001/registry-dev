@@ -67,6 +67,7 @@ main = launchAff_ do
         Spec.describe "Bad package names" badPackageName
         Spec.describe "Good SPDX licenses" goodSPDXLicense
         Spec.describe "Bad SPDX licenses" badSPDXLicense
+        -- TODO: Break out into separate Test.Operation test module
         Spec.describe "Decode GitHub event to Operation" decodeEventsToOps
         Spec.describe "Authenticated operations" SSH.spec
       Spec.describe "Tarball" do

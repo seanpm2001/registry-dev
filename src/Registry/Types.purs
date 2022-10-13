@@ -34,3 +34,10 @@ derive newtype instance Ord RawVersionRange
 derive newtype instance Show RawVersionRange
 derive newtype instance StringEncodable RawVersionRange
 derive newtype instance RegistryJson RawVersionRange
+
+-- TODO - maybe Show constraint
+data Log e
+  = Info String
+  | Warn String
+  | Debug String
+  | Error e

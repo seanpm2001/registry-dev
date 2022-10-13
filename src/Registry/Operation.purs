@@ -2,12 +2,31 @@ module Registry.Operation where
 
 import Registry.Prelude
 
+import Control.Monad.Except (runExceptT)
+import Data.Map as Map
+import Foreign.SPDX (License)
+import Registry.Index (RegistryIndex)
 import Registry.Json ((.:))
 import Registry.Json as Json
 import Registry.PackageName (PackageName)
 import Registry.PackageName as PackageName
-import Registry.Schema (Location)
+import Registry.Schema (Location, Metadata, Owner)
+import Registry.Types (Log)
 import Registry.Version (Version)
+
+type OperationEnv m =
+  { log :: Log OperationError -> m Unit
+  , registryMetadata :: Map PackageName Metadata
+  , registryIndex :: RegistryIndex
+  , detectLicense :: FilePath -> m (Either String License)
+  , verifyOwner :: Owner -> m (Either String Unit)
+  }
+
+data OperationError
+  = OperationError
+  | PublishMissingLocation
+  | PublishLocationNotUnique
+  | UpdateLocationMismatch
 
 data Operation
   = Publish PublishData
@@ -111,3 +130,33 @@ type PackageSetUpdateData =
   { compiler :: Maybe Version
   , packages :: Map PackageName (Maybe Version)
   }
+
+validatePublish :: forall m. Monad m => OperationEnv m -> PublishData -> m Unit
+validatePublish env payload = do
+  publishResult <- verifyPublishPayload env payload
+  pure unit
+
+validateUnpublish :: forall m. Monad m => OperationEnv m -> m Unit
+validateUnpublish _ = pure unit
+
+validateTransfer :: forall m. Monad m => OperationEnv m -> m Unit
+validateTransfer _ = pure unit
+
+verifyPublishPayload :: forall m. Monad m => OperationEnv m -> PublishData -> m (Either OperationError Unit)
+verifyPublishPayload env { name, location } = runExceptT do
+  case Map.lookup name env.registryMetadata of
+    Nothing ->  case location of
+      Nothing -> throwError PublishMissingLocation
+      Just l | not (locationIsUnique l env.registryMetadata) -> throwError PublishLocationNotUnique
+      Just _ -> pure unit
+    Just m -> case location of
+      Just l | m.location /= l -> throwError UpdateLocationMismatch
+      Just _ -> pure unit
+      Nothing -> pure unit
+
+packageNameIsUnique :: PackageName -> Map PackageName Metadata -> Boolean
+packageNameIsUnique name = isNothing <<< Map.lookup name
+
+locationIsUnique :: Location -> Map PackageName Metadata -> Boolean
+locationIsUnique location = Map.isEmpty <<< Map.filter (eq location <<< _.location)
+
