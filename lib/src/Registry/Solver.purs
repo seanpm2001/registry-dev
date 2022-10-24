@@ -2,6 +2,7 @@ module Registry.Solver where
 
 import Registry.Prelude
 
+import Data.Argonaut.Core as Json
 import Data.Array as Array
 import Data.Array.NonEmpty as NEA
 import Data.Foldable (intercalate)
@@ -20,6 +21,7 @@ import Data.Set as Set
 import Data.Set.NonEmpty (NonEmptySet)
 import Data.Set.NonEmpty as NES
 import Data.TraversableWithIndex (traverseWithIndex)
+import Registry.Json (decode, encode)
 import Registry.PackageName (PackageName)
 import Registry.PackageName as PackageName
 import Registry.Version (Range, Version, bumpPatch)
@@ -42,6 +44,11 @@ data LocalSolverPosition
 derive instance Generic LocalSolverPosition _
 derive instance Eq LocalSolverPosition
 instance Show LocalSolverPosition where show = genericShow
+instance RegistryJson LocalSolverPosition where
+  encode Trial = encode "trial"
+  encode Root = encode "root"
+  encode (Solving stuff) = encode $ Array.fromFoldable stuff
+  decode _ = Left "sorry"
 
 instance Semigroup LocalSolverPosition where
   append Trial _ = Trial
@@ -54,6 +61,9 @@ data SolverPosition = Pos LocalSolverPosition (Set PackageName)
 derive instance Generic SolverPosition _
 derive instance Eq SolverPosition
 instance Show SolverPosition where show = genericShow
+instance RegistryJson SolverPosition where
+  encode (Pos local global) = encode { local, global: Array.fromFoldable global }
+  decode _ = Left "soz"
 
 instance Semigroup SolverPosition where append = genericAppend
 
@@ -78,6 +88,11 @@ data DependencyFrom
 data Sourced = Sourced Version SolverPosition
 derive instance Eq Sourced
 derive instance Generic Sourced _
+instance RegistryJson Sourced where
+  encode (Sourced version position) = encode { version, position }
+  decode = decode >>> map
+    \(r :: { version :: Version, position :: SolverPosition }) ->
+      Sourced r.version r.position
 instance Show Sourced where show = genericShow
 
 unSource :: Sourced -> Version
@@ -87,6 +102,7 @@ newtype MinSourced = MinSourced Sourced
 derive instance Newtype MinSourced _
 derive newtype instance Eq MinSourced
 derive newtype instance Show MinSourced
+derive newtype instance RegistryJson MinSourced
 instance Semigroup MinSourced where
   append a@(MinSourced (Sourced av as)) b@(MinSourced (Sourced bv bs)) =
     case compare av bv of
@@ -97,6 +113,7 @@ newtype MaxSourced = MaxSourced Sourced
 derive instance Newtype MaxSourced _
 derive newtype instance Eq MaxSourced
 derive newtype instance Show MaxSourced
+derive newtype instance RegistryJson MaxSourced
 instance Semigroup MaxSourced where
   append a@(MaxSourced (Sourced av as)) b@(MaxSourced (Sourced bv bs)) =
     case compare av bv of
@@ -113,6 +130,7 @@ derive instance Newtype Intersection _
 derive newtype instance Eq Intersection
 derive newtype instance Semigroup Intersection
 derive newtype instance Show Intersection
+derive newtype instance RegistryJson Intersection
 
 
 -- Can be treated as a simple range by outside observers
@@ -286,6 +304,9 @@ data SolverError
   | WhileSolving PackageName (Map Version SolverError)
 
 derive instance Eq SolverError
+instance RegistryJson SolverError where
+  encode = Json.fromString <<< printSolverError
+  decode _ = Left "sorry cannot decode"
 
 checkRequired ::
   { registry :: TransitivizedRegistry
@@ -471,6 +492,11 @@ solve :: Dependencies -> Map PackageName Range -> Either (NEL.NonEmptyList Solve
 solve index pending =
   let
     registry = mapWithIndex (\package -> mapWithIndex \version -> map (intersectionFromRange package version)) $ coerce index
+  in solve' registry pending
+
+solve' :: TransitivizedRegistry -> Map PackageName Range -> Either (NEL.NonEmptyList SolverError) (Map PackageName Version)
+solve' registry pending =
+  let
     required = mapWithIndex intersectionFromRange' $ coerce pending
   in case solveFull { registry, required } of
     Left e -> Left e

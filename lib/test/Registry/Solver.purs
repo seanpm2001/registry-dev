@@ -216,6 +216,28 @@ spec = do
           }
         ]
 
+    Spec.it "Groups same errors" do
+      shouldFail
+        [ chaotic.package /\ range 1 4
+        , prelude.package /\ range 2 4
+        ]
+        [ { error: WhileSolving (package "chaotic") $ Map.fromFoldable
+            [ Tuple (version 1) $ Conflicts $ Map.fromFoldable
+              [ package "prelude" `Tuple` intersection 2 (solveRoot "prelude") 1 (via' "chaotic" 1)
+              ]
+            , Tuple (version 2) $ Conflicts $ Map.fromFoldable
+              -- TODO: why no global "chaotic" here?
+              [ package "prelude" `Tuple` intersection 5 (via "chaotic" 2 []) 4 (solveRoot "prelude")
+              ]
+            , Tuple (version 3) $ Conflicts $ Map.fromFoldable
+              -- TODO: why no global "chaotic" here?
+              [ package "prelude" `Tuple` intersection 5 (via "chaotic" 3 []) 4 (solveRoot "prelude")
+              ]
+            ]
+          , message: "While solving chaotic each version could not be solved:\n- 1.0.0: \n  Conflict in version ranges for prelude:\n    >=2.0.0 (declared dependency)\n    <1.0.0 seen in chaotic@1.0.0\n- 2.0.0: \n  Conflict in version ranges for prelude:\n    >=5.0.0 seen in chaotic@2.0.0\n    <4.0.0 (declared dependency)\n- 3.0.0: \n  Conflict in version ranges for prelude:\n    >=5.0.0 seen in chaotic@3.0.0\n    <4.0.0 (declared dependency)"
+          }
+        ]
+
     -- since we try packages in alphabetical order
     Spec.it "Reports different errors for different versions (converse)" do
       shouldFail
@@ -340,6 +362,7 @@ chaotic =
   , versions: Map.fromFoldable
       [ version 1 /\ Just (prelude.package /\ range 0 1)
       , version 2 /\ Just (prelude.package /\ range 5 6)
+      , version 3 /\ Just (prelude.package /\ range 5 6)
       ]
   }
 
