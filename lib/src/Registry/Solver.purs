@@ -6,7 +6,7 @@ import Data.Argonaut.Core as Json
 import Data.Array as Array
 import Data.Array.NonEmpty as NEA
 import Data.Foldable (intercalate)
-import Data.FoldableWithIndex (foldMapWithIndex)
+import Data.FoldableWithIndex (foldMapWithIndex, traverseWithIndex_)
 import Data.Functor.App (App(..))
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.Generic.Rep (class Generic)
@@ -320,6 +320,36 @@ checkRequired { registry, required: SemigroupMap required } =
     getPackageRange registry package range
   failed = Map.filterWithKey invalid required
 
+getLatest ::
+  { registry :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
+  } ->
+  Maybe (Map PackageName { version :: Version, dependencies :: SemigroupMap PackageName Intersection })
+getLatest { registry, required: SemigroupMap required } =
+  forWithIndex required \package range -> do
+    let possibilities = getPackageRange registry package range
+    { key, value } <- Map.findMax possibilities
+    pure { version: key, dependencies: value }
+
+-- Try the latest available versions of each package. This is safe/optimal
+-- because bounds only shrink as required, so if the latest bounds already
+-- satisfy all of the requirements, those bounds won't ever need to shrink and
+-- this is the solution we would find anyways.
+tryLatest ::
+  { registry :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
+  } ->
+  Maybe (Map PackageName Version)
+tryLatest r = do
+  sol <- getLatest r
+  -- By construction this satisfies required, so we just
+  -- need to check that each has its dependencies included
+  for sol \{ version, dependencies } -> do
+    forWithIndex_ dependencies \dep range -> do
+      { version: vDep } <- Map.lookup dep sol
+      guardA (satisfies vDep range)
+    pure version
+
 checkSolved ::
   { registry :: TransitivizedRegistry
   , required :: SemigroupMap PackageName Intersection
@@ -327,6 +357,7 @@ checkSolved ::
   Either
     { package :: PackageName, versions :: Map Version (SemigroupMap PackageName Intersection) }
     (Map PackageName Version)
+checkSolved r | Just solution <- tryLatest r = pure solution
 checkSolved { registry, required: SemigroupMap required } =
   required # traverseWithIndex \package range ->
     let filteredVersions = getPackageRange registry package range in

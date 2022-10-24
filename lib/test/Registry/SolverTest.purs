@@ -12,6 +12,7 @@ import Data.List ((:))
 import Data.Map (SemigroupMap(..))
 import Data.Map as Map
 import Data.Newtype (unwrap, wrap)
+import Data.String.CodeUnits as String
 import Effect.Console (time, timeEnd)
 import Effect.Unsafe (unsafePerformEffect)
 import Foreign.Git as Git
@@ -38,6 +39,9 @@ perf name f = unsafePerformEffect do
 
 guarded :: forall a. Eq a => Monoid a => a -> Maybe a
 guarded a = if a == mempty then Nothing else Just a
+
+printJsonI :: forall a. RegistryJson a => a -> String
+printJsonI = Array.singleton >>> printJson >>> String.drop 2 >>> String.dropRight 2
 
 main :: Effect Unit
 main = launchAff_ do
@@ -70,6 +74,19 @@ main = launchAff_ do
             [ PackageName.print package <> "@" <> printVersion version
             , es # foldMap \e -> "\n  " <> Solver.printErrorAt "  " e
             ]
+    not_solved :: Tuple String String
+    not_solved = bimap numberedList numberedList $ reg #
+      foldMapWithIndex \package ->
+        bimap Array.reverse Array.reverse <<< foldMapWithIndex \version required ->
+          case Solver.checkSolved { registry: reg, required } of
+            Left _ -> flip Tuple [] $ Array.singleton $ Array.fold
+              [ PackageName.print package <> "@" <> printVersion version
+              ]
+            Right sol -> Tuple [] $ Array.singleton $ Array.fold
+              [ PackageName.print package <> "@" <> printVersion version
+              , "\n"
+              , printJsonI sol
+              ]
     diff :: TransitivizedRegistry -> TransitivizedRegistry -> _
     diff x x' =
       let x0 = (unwrap <<< map (unwrap <<< map unwrap)) x in
@@ -107,5 +124,7 @@ main = launchAff_ do
     _ture = perf "compare" \_ -> t == t
     _ex' = perf "solve ex'" \_ -> Solver.solve' reg ex
   writeTextFile UTF8 "unsolvables.txt" unsolvables
+  writeTextFile UTF8 "notsolved.txt" (fst not_solved)
+  writeTextFile UTF8 "solved.txt" (snd not_solved)
   writeTextFile UTF8 "transitiveSteps.json" ""
   loop t0 0
