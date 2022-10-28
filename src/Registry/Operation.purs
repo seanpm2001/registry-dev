@@ -2,19 +2,15 @@ module Registry.Operation where
 
 import Registry.Prelude
 
-import Control.Monad.Except (ExceptT(..), runExceptT)
+import Control.Monad.Except (runExceptT)
 import Data.Array as Array
-import Data.Foldable (traverse_)
 import Data.Map as Map
 import Data.Newtype (unwrap)
 import Data.Validation.Semigroup as Validation
 import Foreign.FastGlob as FastGlob
-import Foreign.Node.FS as FS.Extra
 import Foreign.SPDX (License)
-import Foreign.Tmp as Tmp
 import Node.FS.Aff as FS
 import Node.FS.Stats as FS.Stats
-import Node.Path as Path
 import Registry.Index (RegistryIndex)
 import Registry.Json ((.:))
 import Registry.Json as Json
@@ -22,9 +18,8 @@ import Registry.PackageName (PackageName)
 import Registry.PackageName as PackageName
 import Registry.Schema (Location, Manifest(..), Metadata, Owner)
 import Registry.Solver as Solver
-import Registry.Types (Log)
+import Registry.Types (Log(..))
 import Registry.Version (Version)
-import Registry.Version as Version
 
 type OperationEnv m =
   { log :: Log OperationError -> m Unit
@@ -36,6 +31,7 @@ type OperationEnv m =
   , fetchPackageManifest :: m Manifest
   -- Create the tarball yourself w/ our exported utils
   , fetchTarballPath :: m FilePath
+  , matchGlobsSource :: Array String -> m (Array FilePath)
   }
 
 -- Registry will construct its own Env that is correct
@@ -166,14 +162,8 @@ validatePublish :: forall m. Monad m => MonadAff m => OperationEnv m -> PublishD
 validatePublish env payload = runExceptT do
   metadata <- ExceptT $ map (lmap Array.singleton) $ verifyPublishPayload env payload
   manifest <- ExceptT $ map (lmap Array.singleton) $ verifyPursFiles env
-  metadataUpdates <- ExceptT $ pure $ verifyPackageInfo env payload manifest metadata
-  -- verifyPackageSource
-
-  -- They'll pass in a filepath to a tarball, we check the size
-  -- don't check ignored files aren't in the tarball - we don't touch tarball
-  -- API only means don't put it here
-
-  pure unit
+  metadataUpdates <- ExceptT $ verifyPackageInfo env payload manifest metadata
+  ExceptT $ map (lmap Array.singleton) $ verifyPackageSource env manifest
 
 validateUnpublish :: forall m. Monad m => OperationEnv m -> m Unit
 validateUnpublish _ = pure unit
@@ -208,50 +198,65 @@ verifyPackageInfo
   -> PublishData 
   -> Manifest
   -> Metadata
-  -> Either (Array OperationError) (Metadata -> Metadata)
-verifyPackageInfo env publishData manifest metadata =
-  Validation.toEither ado
-    update1 <- packageNamesMatch publishData manifest
-    update2 <- notMetadataPackage manifest
-    update3 <- versionDoesNotExist manifest metadata
-    update4 <- locationsMatch manifest metadata
-    update5 <- ownersMatch manifest metadata
-    update6 <- packageDependenciesSolve manifest env.registryIndex
-    -- update7 <- licenseMatch env manifest
-    in update1 >>> update2 >>> update3 >>> update4 >>> update5 >>> update6
+  -> m (Either (Array OperationError) (Metadata -> Metadata))
+verifyPackageInfo env publishData manifest metadata = do
+  env.log $ Debug "Ensuring Package Name matches manifest"
+  let packageNamesMatchResult = packageNamesMatch publishData manifest
+  env.log $ Debug "Ensuring Package Name isn't `metadata`"
+  let notMetadataPackageResult = notMetadataPackage manifest
+  env.log $ Debug "Ensuring package version has not been published or unpublished"
+  let versionDoesNotExistResult = versionDoesNotExist manifest metadata
+  env.log $ Debug "Ensuring locations match"
+  let locationsMatchResult = locationsMatch manifest metadata
+  env.log $ Debug "Ensuring owners match"
+  let ownersMatchResult = ownersMatch manifest metadata
+  env.log $ Debug "Ensuring package dependencies solve"
+  let packageDependenciesSolveResult = packageDependenciesSolve manifest env.registryIndex
+  env.log $ Debug "Ensuring licenses match"
+  licenseMatchResult <- licenseMatch env manifest
+  let
+    { fail } = partitionEithers
+      [ packageNamesMatchResult
+      , notMetadataPackageResult
+      , versionDoesNotExistResult
+      , locationsMatchResult
+      , packageDependenciesSolveResult
+      , licenseMatchResult
+      ]
+  case ownersMatchResult of
+    Left err -> pure $ Left (err <> join fail)
+    Right update -> case join fail of
+      [] -> pure $ Right update
+      _ -> pure $ Left (join fail)
 
-packageNamesMatch :: PublishData -> Manifest -> Validation.V (Array OperationError) (Metadata -> Metadata)
+packageNamesMatch :: PublishData -> Manifest -> Either (Array OperationError) Unit
 packageNamesMatch { name: apiName } (Manifest { name: manifestName }) =
   if apiName /= manifestName then
-    Validation.invalid (Array.singleton PackageNameMismatch)
+    Left [ PackageNameMismatch ]
   else
-    pure (\i -> i)
+    pure unit
 
-notMetadataPackage :: Manifest -> Validation.V (Array OperationError) (Metadata -> Metadata)
+notMetadataPackage :: Manifest -> Either (Array OperationError) Unit
 notMetadataPackage (Manifest { name }) =
-  if PackageName.print name == "metadata" then
-    Validation.invalid (Array.singleton MetadataPackageUpload)
-  else
-    pure identity
+  when (PackageName.print name == "metadata") do
+    Left [ MetadataPackageUpload ]
 
-versionDoesNotExist :: Manifest -> Metadata -> Validation.V (Array OperationError) (Metadata -> Metadata)
-versionDoesNotExist (Manifest { version }) metadata = ado
+versionDoesNotExist :: Manifest -> Metadata -> Either (Array OperationError) Unit
+versionDoesNotExist (Manifest { version }) metadata = Validation.toEither ado
   _ <- case Map.lookup version metadata.published of
     Just _ -> Validation.invalid (Array.singleton VersionAlreadyPublished)
-    Nothing -> pure (\i -> i)
+    Nothing -> pure unit
   _ <- case Map.lookup version metadata.unpublished of
     Just _ -> Validation.invalid (Array.singleton VersionAlreadyUnpublished)
-    Nothing -> pure (\i -> i)
-  in identity
+    Nothing -> pure unit
+  in unit
 
-locationsMatch :: Manifest -> Metadata -> Validation.V (Array OperationError) (Metadata -> Metadata)
+locationsMatch :: Manifest -> Metadata -> Either (Array OperationError) Unit
 locationsMatch (Manifest { location }) { location: metadataLocation } =
-  if location /= metadataLocation then
-    Validation.invalid (Array.singleton LocationMismatch)
-  else
-    pure identity
+  when (location /= metadataLocation) do
+    Left [ LocationMismatch ]
 
-ownersMatch :: Manifest -> Metadata -> Validation.V (Array OperationError) (Metadata -> Metadata)
+ownersMatch :: Manifest -> Metadata -> Either (Array OperationError) (Metadata -> Metadata)
 ownersMatch (Manifest { owners: manifestOwners }) { owners: metadataOwners } =
   if manifestOwners /= metadataOwners then
     pure (_ { owners = manifestOwners })
@@ -259,24 +264,22 @@ ownersMatch (Manifest { owners: manifestOwners }) { owners: metadataOwners } =
     pure (\i -> i)
 
 -- If they gave us resolutions, then we skip this step.
-packageDependenciesSolve :: Manifest -> RegistryIndex -> Validation.V (Array OperationError) (Metadata -> Metadata)
+packageDependenciesSolve :: Manifest -> RegistryIndex -> Either (Array OperationError) Unit
 packageDependenciesSolve (Manifest { dependencies }) registryIndex =
   case Solver.solve (map (map (unwrap >>> _.dependencies)) registryIndex) dependencies of
-    Left _ -> Validation.invalid (Array.singleton PackageDidNotSolve)
-    Right _ -> pure identity
+    Left _ -> Left [ PackageDidNotSolve ]
+    Right _ -> pure unit
 
 -- Should already have the package source
-licenseMatch :: forall m. Monad m => MonadAff m => OperationEnv m -> Manifest -> m (Validation.V (Array OperationError) (Metadata -> Metadata))
+licenseMatch :: forall m. Monad m => MonadAff m => OperationEnv m -> Manifest -> m (Either (Array OperationError) Unit)
 licenseMatch env (Manifest { license }) = do
   packageSource <- env.fetchPackageSource
   licenseResult <- env.detectLicense packageSource license
   case licenseResult of
-    Left _ -> pure $ Validation.invalid (Array.singleton LicenseMismatch)
-    Right sourceLicense ->
-      if license /= sourceLicense then
-        pure $ Validation.invalid (Array.singleton LicenseMismatch)
-      else
-        pure $ pure identity
+    Left _ -> pure $ Left [ LicenseMismatch ]
+    Right sourceLicense -> pure do
+      when (license /= sourceLicense) do
+        Left [ LicenseMismatch ]
 
 verifyPackageSource
   :: forall m
@@ -284,20 +287,23 @@ verifyPackageSource
   => MonadAff m 
   => OperationEnv m 
   -> Manifest
-  -> FilePath 
   -> m (Either OperationError Unit)
-verifyPackageSource env (Manifest manifest) packageSource = runExceptT do
-  tmpDir <- liftEffect $ Tmp.mkTmpDir
-  let newDirname = PackageName.print manifest.name <> "-" <> Version.printVersion manifest.version
-  let packageSourceDir = Path.concat [ tmpDir, newDirname ]
-  ExceptT $ copyPackageSourceFiles manifest.files { source: packageSource, destination: packageSourceDir }
-  lift $ removeIgnoredTarballFiles tmpDir
-  let tarballPath = packageSource <> ".tar.gz"
-  lift $ env.createTar { cwd: tmpDir, folderName: newDirname }
+verifyPackageSource env (Manifest manifest) = runExceptT do
+  tarballPath <- lift env.fetchTarballPath 
   FS.Stats.Stats { size: bytes } <- liftAff $ FS.stat tarballPath
   -- when (bytes > warnPackageBytes) do
   when (bytes > maxPackageBytes) do
     throwError PackageTarBallSizeExceedsMaximum
+
+  case manifest.files of
+      Nothing -> pure unit
+      Just files -> do
+        packageSource <- lift env.fetchPackageSource
+        matches <- lift $ env.matchGlobsSource files
+        { failed } <- liftAff $ FastGlob.sanitizePaths packageSource matches
+
+        unless (Array.null failed) do
+          throwError PackageSourceFilesOutsideDirectory
 
 -- | The absolute maximum bytes allowed in a package
 maxPackageBytes :: Number
@@ -312,97 +318,3 @@ packageNameIsUnique name = isNothing <<< Map.lookup name
 
 locationIsUnique :: Location -> Map PackageName Metadata -> Boolean
 locationIsUnique location = Map.isEmpty <<< Map.filter (eq location <<< _.location)
-
--- | Copy files from the package source directory to the destination directory
--- | for the tarball. This will copy all always-included files as well as files
--- | provided by the user via the `files` key.
-
--- TODO: Don't actually copy, just run validation on source
--- TODO: Have the user pass us a glob matcher - we'll give them the globs, then we will sanitize filepaths & run check
-copyPackageSourceFiles :: forall m. MonadAff m => Maybe (Array String) -> { source :: FilePath, destination :: FilePath } -> m (Either OperationError Unit)
-copyPackageSourceFiles files { source, destination } = runExceptT do
-  userFiles <- case files of
-    Nothing -> pure []
-    Just globs -> do
-      { succeeded, failed } <- liftAff $ FastGlob.match source globs
-
-      unless (Array.null failed) do
-        throwError PackageSourceFilesOutsideDirectory
-          -- String.joinWith " "
-          -- [ "Some paths matched by globs in the 'files' key are outside your package directory."
-          -- , "Please ensure globs only match within your package directory, including symlinks."
-          -- ]
-
-      pure succeeded
-
-  includedFiles <- liftAff $ FastGlob.match source includedGlobs
-  includedInsensitiveFiles <- liftAff $ FastGlob.match' source includedInsensitiveGlobs { caseSensitive: false }
-
-  let
-    copyFiles = userFiles <> includedFiles.succeeded <> includedInsensitiveFiles.succeeded
-    makePaths path = { from: Path.concat [ source, path ], to: Path.concat [ destination, path ], preserveTimestamps: true }
-
-  liftAff $ traverse_ (makePaths >>> FS.Extra.copy) copyFiles
-
--- | We always include some files and directories when packaging a tarball, in
--- | addition to files users opt-in to with the 'files' key.
-includedGlobs :: Array String
-includedGlobs =
-  [ "src/"
-  , "purs.json"
-  , "spago.dhall"
-  , "packages.dhall"
-  , "bower.json"
-  , "package.json"
-  ]
-
--- | These files are always included and should be globbed in case-insensitive
--- | mode.
-includedInsensitiveGlobs :: Array String
-includedInsensitiveGlobs =
-  [ "README*"
-  , "LICENSE*"
-  , "LICENCE*"
-  ]
-
--- | We always ignore some files and directories when packaging a tarball, such
--- | as common version control directories, even if a user has explicitly opted
--- | in to those files with the 'files' key.
--- |
--- | See also:
--- | https://docs.npmjs.com/cli/v8/configuring-npm/package-json#files
-removeIgnoredTarballFiles :: forall m. Monad m => MonadAff m => FilePath -> m Unit
-removeIgnoredTarballFiles path = do
-  globMatches <- liftAff $ FastGlob.match' path ignoredGlobs { caseSensitive: false }
-  for_ (ignoredDirectories <> ignoredFiles <> globMatches.succeeded) \match ->
-    liftAff $ FS.Extra.remove (Path.concat [ path, match ])
-
-ignoredDirectories :: Array FilePath
-ignoredDirectories =
-  [ ".psci"
-  , ".psci_modules"
-  , ".spago"
-  , "node_modules"
-  , "bower_components"
-  -- These files and directories are ignored by the NPM CLI and we are
-  -- following their lead in ignoring them as well.
-  , ".git"
-  , "CVS"
-  , ".svn"
-  , ".hg"
-  ]
-
-ignoredFiles :: Array FilePath
-ignoredFiles =
-  [ "package-lock.json"
-  , "yarn.lock"
-  , "pnpm-lock.yaml"
-  ]
-
-ignoredGlobs :: Array String
-ignoredGlobs =
-  [ "**/*.*.swp"
-  , "**/._*"
-  , "**/.DS_Store"
-  ]
-
