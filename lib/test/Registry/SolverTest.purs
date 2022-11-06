@@ -96,7 +96,8 @@ main = launchAff_ do
       if r'.updated == mempty then pure r'.registry else loop2 (i + 1) r'
   writeTextFile UTF8 "transitiveSteps.json" ""
   reg <- loop2 0 { registry: r0, updated: r0 }
-  writeJsonFile "untransitive.json" $ downcastR $ reg
+  writeJsonFile "untransitive.json" $ downcastR reg
+  let _ex' = perf "solve ex'" \_ -> Solver.solve' reg ex
   let
     numberedList = foldMapWithIndex \i x -> show (i + 1) <> ". " <> x <> "\n"
     unsolvables :: String
@@ -128,7 +129,8 @@ main = launchAff_ do
   writeTextFile UTF8 "unsolvables.txt" unsolvables
   writeTextFile UTF8 "notsolved.txt" (fst not_solved)
   writeTextFile UTF8 "solved.txt" (snd not_solved)
-  writeJsonFile "retransitive.json" (diff reg (Solver.exploreAllTransitiveDependencies reg))
+  -- writeJsonFile "retransitive.json" (diff reg (Solver.exploreAllTransitiveDependencies reg))
+  pure unit
   -- perf "transitivize" \_ -> Solver.exploreAllTransitiveDependencies r0
   {-
   let

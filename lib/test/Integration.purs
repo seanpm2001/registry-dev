@@ -10,10 +10,12 @@ import Data.Array as Array
 import Data.Map as Map
 import Data.String as String
 import Effect.Exception as Exception
+import Effect.Unsafe (unsafePerformEffect)
 import Foreign.Git as Git
 import Foreign.Tmp as Tmp
 import Node.ChildProcess as NodeProcess
 import Node.Path as Path
+import Node.Process (argv)
 import Registry.Index (RegistryIndex)
 import Registry.Index as Index
 import Registry.Json as Json
@@ -31,12 +33,24 @@ import Test.Spec.Reporter (consoleReporter)
 import Test.Spec.Runner (defaultConfig, runSpec')
 
 main :: Effect Unit
-main = launchAff_ do
+main = do
+  args <- argv
+  case Array.drop 2 args of
+    [] -> tests
+    [package_versionS] | [packageS,versionS] <- String.split (String.Pattern "@") package_versionS -> do
+      let
+        package = unsafeFromRight $ PackageName.parse packageS
+        version = unsafeFromRight $ Version.parseVersion Version.Lenient versionS
+      testOne package version
+    _ -> logShow args
+
+tests :: Effect Unit
+tests = launchAff_ do
   { solverIndex, solutions } <- setup
 
   runSpec' defaultConfig [ consoleReporter ] do
-    Spec.describe "Solves core packages" do
-      mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript" solutions
+    -- Spec.describe "Solves core packages" do
+    --   mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript" solutions
 
     Spec.describe "Solves contrib packages" do
       mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript-contrib" solutions
@@ -75,13 +89,26 @@ segmentSolvableByOwner index bowerDir = map snd $ flip State.runStateT Map.empty
             _ ->
               pure unit
 
+testOne :: PackageName -> Version -> Effect Unit
+testOne package version = launchAff_ do
+  { solverIndex, solutions } <- setup
+
+  runSpec' defaultConfig [ consoleReporter ] do
+    Spec.describe "Solves specified package" do
+      mkTest solverIndex $ map (select version) $ select package $ unsafeFromJust $ Map.lookup "purescript-contrib" solutions
+
+select :: forall k15 v16. Ord k15 => k15 -> Map k15 v16 -> Map k15 v16
+select k m = case Map.lookup k m of
+  Just v -> Map.singleton k v
+  Nothing -> Map.empty
+
 setup :: Aff { solverIndex :: Solver.Dependencies, solutions :: Map String (Map PackageName (Map Version { bower :: BowerSolved, manifest :: Map PackageName Range })) }
 setup = do
   tmp <- liftEffect Tmp.mkTmpDir
 
   result <- withBackoff' $ Except.runExceptT do
     log "Fetching registry index..."
-    Git.runGit_ [ "clone", "https://github.com/purescript/registry-index", "--depth", "100" ] (Just tmp)
+    Git.runGit_ [ "clone", "https://github.com/purescript/registry-index", "--depth", "500" ] (Just tmp)
     void $ lift $ Process.spawn { cmd: "bash", args: [ "-c", "cd registry-index && git checkout e7346e906d7bb93ed98e7f4c43349ed01b8398ed" ], stdin: Nothing } (NodeProcess.defaultSpawnOptions { cwd = Just tmp })
     log "Fetching bower solutions..."
     Git.runGit_ [ "clone", "https://github.com/thomashoneyman/bower-solver-results", "--depth", "1" ] (Just tmp)
@@ -132,6 +159,8 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
         Solver.Conflicts es ->
           es # any \i -> Solver.upperBound i > Solver.lowerBound i
         _ -> false
+
+      _ = unsafePerformEffect $ log $ "%%% Solving " <> name <> " %%%"
 
     case Solver.solve solverIndex dependencies of
       -- If we can't provide a solution because no versions are available in

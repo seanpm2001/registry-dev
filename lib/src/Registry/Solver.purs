@@ -5,7 +5,8 @@ import Registry.Prelude
 import Data.Argonaut.Core as Json
 import Data.Array as Array
 import Data.Array.NonEmpty as NEA
-import Data.Foldable (foldMap, intercalate)
+import Data.Filterable (partitionMap)
+import Data.Foldable (foldMap, intercalate, sum)
 import Data.FoldableWithIndex (anyWithIndex, foldMapWithIndex)
 import Data.Functor.App (App(..))
 import Data.FunctorWithIndex (mapWithIndex)
@@ -14,15 +15,18 @@ import Data.Generic.Rep as Generic
 import Data.List.NonEmpty as NEL
 import Data.Map (SemigroupMap(..))
 import Data.Map as Map
+import Data.Monoid (power)
 import Data.Monoid.Disj (Disj(..))
 import Data.Newtype (over, unwrap, wrap)
 import Data.Semigroup.Foldable (intercalateMap)
-import Data.Semigroup.Generic (genericAppend)
 import Data.Set as Set
 import Data.Set.NonEmpty (NonEmptySet)
 import Data.Set.NonEmpty as NES
+import Data.String as String
 import Data.TraversableWithIndex (traverseWithIndex)
-import Registry.Json (decode, encode)
+import Effect.Class.Console (time, timeEnd)
+import Effect.Unsafe (unsafePerformEffect)
+import Registry.Json (decode, encode, printJson)
 import Registry.PackageName (PackageName)
 import Registry.PackageName as PackageName
 import Registry.Version (Range, Version, bumpPatch)
@@ -69,7 +73,9 @@ instance RegistryJson SolverPosition where
   encode (Pos local global) = encode { local, global: Array.fromFoldable global }
   decode _ = Left "soz"
 
-instance Semigroup SolverPosition where append = genericAppend
+instance Semigroup SolverPosition where
+  append (Pos l1 g1) (Pos l2 g2) =
+    Pos (l1 <> l2) (g1 <> g2)
 
 dependency :: SolverPosition -> SolverPosition -> SolverPosition
 dependency (Pos _ g1) (Pos l2 g2) = Pos l2 (g1 <> g2)
@@ -174,16 +180,6 @@ toLoose _ = Nothing
 fromLoose :: Loose -> Intersection
 fromLoose = coerce
 
-commonalities ::
-  NonEmptyArray (Map PackageName { range :: Loose, seen :: Set Version }) ->
-  { required :: App (Map PackageName) Loose
-  , seen :: SemigroupMap PackageName (Set Version)
-  }
-commonalities = NEA.foldMap1 \deps ->
-  { required: App (deps <#> _.range)
-  , seen: SemigroupMap (deps <#> _.seen)
-  }
-
 satisfies :: forall r x y.
   Newtype r { lower :: x, upper :: y } =>
   Newtype x Sourced => Newtype y Sourced =>
@@ -213,21 +209,32 @@ soleVersionOf package v = SemigroupMap (Map.singleton package (soleVersion v))
 
 type TransitivizedRegistry =
   SemigroupMap PackageName (SemigroupMap Version (SemigroupMap PackageName Intersection))
-type RR =
+type RR r =
   { registry :: TransitivizedRegistry
   , required :: SemigroupMap PackageName Intersection
+  | r
   }
 
-gatherReachable :: RR -> TransitivizedRegistry
+gatherReachable :: forall r. RR r -> TransitivizedRegistry
 gatherReachable { registry, required } =
   let
     reachable0 :: SemigroupMap PackageName (SemigroupMap Version (SemigroupMap PackageName Intersection))
     reachable0 = mapWithIndex (getPackageRange registry) required
     reachable' = identity <> (foldMap <<< foldMap) (mapWithIndex (getPackageRange registry))
-  in fixEq reachable' reachable0
+    reachable = fixEq reachable' reachable0
+  in trace [show (Map.size (unwrap reachable)), " reachable packages with ", show (sum (Map.size <<< unwrap <$> reachable)), " versions"] reachable
 
-withReachable :: RR -> RR
-withReachable r = { registry: gatherReachable r, required: r.required }
+withReachable :: forall r. RR r -> RR r
+withReachable r = r { registry = map (_ <> r.required) <$> gatherReachable r }
+
+trimReachable :: forall r. RR r -> RR r
+trimReachable r = r
+  { registry = r.registry # mapWithIndex \package ->
+      over SemigroupMap $ Map.filterWithKey \version _ ->
+        case Map.lookup package $ unwrap r.required of
+          Nothing -> true
+          Just range -> satisfies version range
+  }
 
 -- We record what dependencies are required no matter which path we take,
 -- and what package versions we saw to explore next (which is basically the
@@ -249,10 +256,6 @@ commonDependencies registry package range =
       case NEA.foldMap1 App (un SemigroupMap <$> versionDependencies) of
         App reqs ->
           SemigroupMap $ reqs <#> asDependencyOf range <<< fromLoose
-
-type Seen = SemigroupMap PackageName (Set Version)
-type SeenWith = Tuple Seen
-type SeenWithRegistry = SeenWith TransitivizedRegistry
 
 noUpdates :: forall r k v. { updated :: SemigroupMap k v | r } -> Boolean
 noUpdates { updated: SemigroupMap updated } = Map.isEmpty updated
@@ -294,9 +297,12 @@ solveStep ::
   , registry :: TransitivizedRegistry
   , updated :: TransitivizedRegistry
   }
-solveStep initial = base <> more
+solveStep initial =
+  { required: initial.required <> moreRequired
+  , registry: moreRegistry
+  , updated: updated <> updatedOfReqs
+  }
   where
-  base = { required: initial.required, registry: initial.registry, updated: mempty }
   -- Transitivize direct requirements
   moreRequired = initial.required # foldMapWithIndex (commonDependencies initial.registry)
   -- Record updates to them
@@ -304,8 +310,7 @@ solveStep initial = base <> more
   -- Transitivize the rest of the registry, which should be:
   --   (1) Pruned at the start to only reachable package versions
   --   (2) Only touching packages that were directly updated last round
-  { updated, registry: moreRegistry } = exploreTransitiveDependencies initial
-  more = { required: moreRequired, registry: moreRegistry, updated: updated <> updatedOfReqs }
+  { updated, registry: moreRegistry } = exploreTransitiveDependencies (initial { registry = map (_ <> moreRequired) <$> initial.registry })
 
 fixEq :: forall a. Eq a => (a -> a) -> (a -> a)
 fixEq f a = let b = f a in if b == a then a else fixEq f b
@@ -323,11 +328,16 @@ majorUpdate (SemigroupMap orig) updated =
     info = updated # anyWithIndex \package range ->
       case Map.lookup package orig of
         Nothing -> minor { added = true }
-        Just r -> minor { failedAlready = good r, failedNow = good range }
+        Just r -> minor { failedAlready = not good r, failedNow = not good range }
   in case info of
     { added: true } -> true
     { failedNow: true, failedAlready: false } -> true
     _ -> false
+
+trace msg a = unsafePerformEffect (a <$ log (Array.fold msg))
+spy lbl a = trace [lbl, ": ", show a] a
+spyVia lbl manip a = trace [lbl, ": ", show (manip a)] a
+showUpdates = Array.fromFoldable <<< Map.keys <<< unwrap
 
 requirementUpdates :: forall r.
   { registry :: TransitivizedRegistry
@@ -340,7 +350,9 @@ requirementUpdates { registry: SemigroupMap registry, required: SemigroupMap req
       changed =
         case Map.lookup package required of
           Nothing -> true
-          Just oldRange -> oldRange /= oldRange <> newRange
+          Just oldRange ->
+            lowerBound oldRange < lowerBound newRange ||
+            upperBound oldRange > upperBound newRange
     in if not changed then mempty else
       case Map.lookup package registry of
         Just versions -> SemigroupMap $ Map.singleton package versions
@@ -357,6 +369,23 @@ solveSeed ::
   }
 solveSeed { registry, required } = { registry, required, updated: registry }
 
+downcast :: Intersection -> _
+downcast i | good i = Right $ ">=" <> Version.printVersion (lowerBound i) <> " <" <> Version.printVersion (upperBound i)
+downcast i = Left $ "<" <> Version.printVersion (upperBound i) <> " >=" <> Version.printVersion (lowerBound i)
+
+downcastR :: TransitivizedRegistry -> _
+downcastR r = map map map (partitionMap downcast) $ map map map unwrap $ map unwrap $ unwrap r
+
+downcastR' :: TransitivizedRegistry -> _
+downcastR' = downcastR >>> map (Map.keys >>> Array.fromFoldable)
+
+stuff :: TransitivizedRegistry -> String
+stuff r =
+  let
+    txt1 = printJson $ downcastR r
+  in if String.length txt1 < 16383 then txt1
+    else printJson $ downcastR' r
+
 solveSteps ::
   { registry :: TransitivizedRegistry
   , required :: SemigroupMap PackageName Intersection
@@ -365,8 +394,10 @@ solveSteps ::
   { registry :: TransitivizedRegistry
   , required :: SemigroupMap PackageName Intersection
   }
-solveSteps r@{ registry, required } | noUpdates r = { registry, required }
-solveSteps r = solveSteps (solveStep r)
+solveSteps r0 = go 0 r0 where
+  go i r@{ registry, required } | noUpdates r =
+    trace ["took ", show i, " iterations:"] { registry, required }
+  go i r = go (i + 1) (solveStep r)
 
 type SolverErrors = NEL.NonEmptyList SolverError
 data SolverError
@@ -450,40 +481,52 @@ instance Apply (LastSuccess b) where
 instance Applicative (LastSuccess b) where
   pure = LastSuccess <<< pure <<< Left
 
+perf :: forall b. String -> (Unit -> b) -> b
+perf name f = unsafePerformEffect do
+  time name
+  let b = f unit
+  timeEnd name
+  pure b
+perf1 :: forall a b. String -> (a -> b) -> a -> b
+perf1 name f a = perf name \_ -> f a
+
 solveFull ::
   { registry :: TransitivizedRegistry
   , required :: SemigroupMap PackageName Intersection
   } ->
   Either SolverErrors (Map PackageName Version)
-solveFull = solveAux false <<< solveSeed <<< withReachable
+solveFull = (perf1 "^^^ solveFull" (solveAux 0 false)) <<< solveSeed <<< (perf1 "withReachable0" withReachable)
   where
   solveAux ::
+    Int ->
     Boolean ->
     { registry :: TransitivizedRegistry
     , updated :: TransitivizedRegistry
     , required :: SemigroupMap PackageName Intersection
     } ->
     Either SolverErrors (Map PackageName Version)
-  solveAux continue = solveSteps >>> \r -> do
+  solveAux i continue a = perf1 "solveSteps" solveSteps a # trace ["> solveAux", show i] (perf1 ("< solveAux" <> show i) \r -> do
     lmap (pure <<< Conflicts) (checkRequired r)
     case checkSolved r of
       Right solved -> Right solved
       Left { package, versions } ->
         let
-          sols = mapWithIndex (\version deps -> LastSuccess \_ -> solvePackage r package version deps) versions
+          sols = mapWithIndex (\version deps -> LastSuccess \_ -> solvePackage i r package version deps) versions
         in case unwrap (sequence sols) unit of
           Right solved -> Right solved
           Left errors ->
             let
               err = WhileSolving package (NEL.head <$> errors)
               errs = if not continue then mempty else
-                case solveAux continue (package `deleteFrom` r) of
+                case solveAux i continue (package `deleteFrom` r) of
                   Left more -> NEL.toList more
                   Right _ -> mempty
-            in Left $ NEL.cons' err errs
-  solvePackage r package version dependencies =
+            in Left $ NEL.cons' err errs)
+  solvePackage i r package version dependencies =
+    let indent = power "  " i in
+    let _ = trace [ indent, "TRYING ", PackageName.print package, "@", Version.printVersion version ] unit in
     let required = r.required <> soleVersionOf package version <> dependencies
-    in solveAux false { registry: r.registry, required, updated: SemigroupMap $ Map.singleton package $ SemigroupMap $ Map.singleton version $ dependencies }
+    in solveAux (i + 1) false (trimReachable { registry: r.registry, required, updated: SemigroupMap $ Map.singleton package $ SemigroupMap $ Map.singleton version $ dependencies })
   deleteFrom package { registry, required } = do
     let
       deleter :: forall v. SemigroupMap PackageName v -> SemigroupMap PackageName v
