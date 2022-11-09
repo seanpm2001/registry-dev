@@ -38,6 +38,14 @@ type OperationEnv m =
 -- Need to be abstract enough
 -- Is it important to build in spago.yaml files within the Registry?
 
+-- TODO:
+-- - For each OperationError, add context to constructor
+-- - Add printOperationError function
+-- - Do I need to handle whether or not they pass in a build plan?
+-- - 
+-- - 
+-- - 
+
 data OperationError
   = PublishMissingLocation
   | PublishLocationNotUnique
@@ -51,9 +59,7 @@ data OperationError
   | PackageDidNotSolve
   | LicenseMismatch
   | PackageSourceFilesOutsideDirectory
-  | PackageTarBallSizeExceedsMaximum
-
--- TODO: printError :: OperationError -> String
+  | PackageTarballSizeExceedsMaximum Number
 
 data Operation
   = Publish PublishData
@@ -291,9 +297,11 @@ verifyPackageSource
 verifyPackageSource env (Manifest manifest) = runExceptT do
   tarballPath <- lift env.fetchTarballPath 
   FS.Stats.Stats { size: bytes } <- liftAff $ FS.stat tarballPath
-  -- when (bytes > warnPackageBytes) do
+
+  when (bytes > warnPackageBytes) do
+    lift $ env.log $ Warn $ "Package tarball is " <> show bytes <> ".\ncc: @purescript/packaging"
   when (bytes > maxPackageBytes) do
-    throwError PackageTarBallSizeExceedsMaximum
+    throwError $ PackageTarballSizeExceedsMaximum bytes
 
   case manifest.files of
       Nothing -> pure unit
@@ -312,9 +320,6 @@ maxPackageBytes = 2_000_000.0
 -- | The number of bytes over which we flag a package for review
 warnPackageBytes :: Number
 warnPackageBytes = 200_000.0
-
-packageNameIsUnique :: PackageName -> Map PackageName Metadata -> Boolean
-packageNameIsUnique name = isNothing <<< Map.lookup name
 
 locationIsUnique :: Location -> Map PackageName Metadata -> Boolean
 locationIsUnique location = Map.isEmpty <<< Map.filter (eq location <<< _.location)
