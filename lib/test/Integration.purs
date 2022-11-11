@@ -9,8 +9,9 @@ import Control.Monad.State as State
 import Data.Array as Array
 import Data.Map as Map
 import Data.String as String
+import Data.Time.Duration (Milliseconds(..))
+import Effect.Aff as Aff
 import Effect.Exception as Exception
-import Effect.Unsafe (unsafePerformEffect)
 import Foreign.Git as Git
 import Foreign.Tmp as Tmp
 import Node.ChildProcess as NodeProcess
@@ -48,7 +49,7 @@ tests :: Effect Unit
 tests = launchAff_ do
   { solverIndex, solutions } <- setup
 
-  runSpec' defaultConfig [ consoleReporter ] do
+  runSpec' (defaultConfig { timeout = Nothing }) [ consoleReporter ] do
     -- Spec.describe "Solves core packages" do
     --   mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript" solutions
 
@@ -56,10 +57,10 @@ tests = launchAff_ do
       mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript-contrib" solutions
 
     Spec.describe "Solves web packages" do
-      mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript-node" solutions
+      mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript-web" solutions
 
     Spec.describe "Solves node packages" do
-      mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript-web" solutions
+      mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript-node" solutions
 
 type Owner = String
 
@@ -93,9 +94,9 @@ testOne :: PackageName -> Version -> Effect Unit
 testOne package version = launchAff_ do
   { solverIndex, solutions } <- setup
 
-  runSpec' defaultConfig [ consoleReporter ] do
+  runSpec' (defaultConfig { timeout = Nothing }) [ consoleReporter ] do
     Spec.describe "Solves specified package" do
-      mkTest solverIndex $ map (select version) $ select package $ unsafeFromJust $ Map.lookup "purescript-contrib" solutions
+      mkTest solverIndex $ map (select version) $ select package $ Map.unions solutions
 
 select :: forall k15 v16. Ord k15 => k15 -> Map k15 v16 -> Map k15 v16
 select k m = case Map.lookup k m of
@@ -160,7 +161,8 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
           es # any \i -> Solver.upperBound i > Solver.lowerBound i
         _ -> false
 
-      _ = unsafePerformEffect $ log $ "%%% Solving " <> name <> " %%%"
+    Aff.delay (Milliseconds 5.0)
+    log $ "%%% Solving " <> name <> " %%%"
 
     case Solver.solve solverIndex dependencies of
       -- If we can't provide a solution because no versions are available in

@@ -55,10 +55,22 @@ newtype Version = Version
   }
 
 instance Eq Version where
-  eq = eq `on` (\(Version v) -> [ v.major, v.minor, v.patch ])
+  eq (Version l) (Version r) =
+    case l.major == r.major of
+      true ->
+        case l.minor == r.minor of
+          true -> l.patch == r.patch
+          x -> x
+      x -> x
 
 instance Ord Version where
-  compare = compare `on` (\(Version v) -> [ v.major, v.minor, v.patch ])
+  compare (Version l) (Version r) =
+    case l.major `compare` r.major of
+      EQ ->
+        case l.minor `compare` r.minor of
+          EQ -> l.patch `compare` r.patch
+          x -> x
+      x -> x
 
 instance Show Version where
   show = printVersion

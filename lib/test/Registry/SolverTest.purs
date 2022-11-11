@@ -105,7 +105,7 @@ main = launchAff_ do
       foldMapWithIndex \package ->
         Array.reverse <<< foldMapWithIndex \version required ->
           let
-            es = either (Array.singleton <<< Solver.Conflicts) mempty $ Solver.checkRequired { registry: reg, required }
+            es = either Array.singleton mempty $ Solver.checkRequired { registry: reg, required }
           in if Array.null es then mempty else Array.singleton $ Array.fold
             [ PackageName.print package <> "@" <> printVersion version
             , es # foldMap \e -> "\n  " <> Solver.printErrorAt "  " e
