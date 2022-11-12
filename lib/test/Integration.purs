@@ -12,6 +12,7 @@ import Data.String as String
 import Data.Time.Duration (Milliseconds(..))
 import Effect.Aff as Aff
 import Effect.Exception as Exception
+import Effect.Unsafe (unsafePerformEffect)
 import Foreign.Git as Git
 import Foreign.Tmp as Tmp
 import Node.ChildProcess as NodeProcess
@@ -161,8 +162,7 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
           es # any \i -> Solver.upperBound i > Solver.lowerBound i
         _ -> false
 
-    Aff.delay (Milliseconds 5.0)
-    log $ "%%% Solving " <> name <> " %%%"
+    let _ = unsafePerformEffect $ log $ "%%% Solving " <> name <> " %%%"
 
     case Solver.solve solverIndex dependencies of
       -- If we can't provide a solution because no versions are available in

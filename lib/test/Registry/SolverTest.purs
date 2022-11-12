@@ -105,7 +105,7 @@ main = launchAff_ do
       foldMapWithIndex \package ->
         Array.reverse <<< foldMapWithIndex \version required ->
           let
-            es = either Array.singleton mempty $ Solver.checkRequired { registry: reg, required }
+            es = either Array.singleton mempty $ Solver.checkRequired $ Solver.withInRange { registry: reg, required }
           in if Array.null es then mempty else Array.singleton $ Array.fold
             [ PackageName.print package <> "@" <> printVersion version
             , es # foldMap \e -> "\n  " <> Solver.printErrorAt "  " e
@@ -114,10 +114,10 @@ main = launchAff_ do
     not_solved = bimap numberedList numberedList $ reg #
       foldMapWithIndex \package ->
         bimap Array.reverse Array.reverse <<< foldMapWithIndex \version required ->
-          case Solver.checkRequired { registry: reg, required } of
+          case Solver.checkRequired $ Solver.withInRange { registry: reg, required } of
             Left _ -> mempty
             Right _ ->
-              case Solver.checkSolved { registry: reg, required } of
+              case Solver.checkSolved $ Solver.withInRange { registry: reg, required } of
                 Left _ -> flip Tuple [] $ Array.singleton $ Array.fold
                   [ PackageName.print package <> "@" <> printVersion version
                   ]
