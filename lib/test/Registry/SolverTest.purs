@@ -95,7 +95,7 @@ main = launchAff_ do
         printJson step <> "\n"
       if r'.updated == mempty then pure r'.registry else loop2 (i + 1) r'
   writeTextFile UTF8 "transitiveSteps.json" ""
-  reg <- loop2 0 { registry: r0, updated: r0 }
+  reg <- loop2 0 { registry: r0, updated: r0, required: mempty }
   writeJsonFile "untransitive.json" $ downcastR reg
   let _ex' = perf "solve ex'" \_ -> Solver.solve' reg ex
   let

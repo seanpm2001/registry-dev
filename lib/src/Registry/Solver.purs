@@ -267,7 +267,7 @@ noUpdates :: forall r k v. { updated :: SemigroupMap k v | r } -> Boolean
 noUpdates { updated: SemigroupMap updated } = Map.isEmpty updated
 
 exploreAllTransitiveDependencies :: TransitivizedRegistry -> TransitivizedRegistry
-exploreAllTransitiveDependencies registry = go { registry, updated: registry }
+exploreAllTransitiveDependencies registry = go { registry, updated: registry, required: mempty }
   where
   go r | noUpdates r = r.registry
   go r = go (exploreTransitiveDependencies r)
@@ -284,12 +284,14 @@ accumulated (Endo f) = f mempty
 exploreTransitiveDependencies :: forall r.
   { registry :: TransitivizedRegistry
   , updated :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
   | r
   } ->
   { registry :: TransitivizedRegistry
   , updated :: TransitivizedRegistry
+  , required :: SemigroupMap PackageName Intersection
   }
-exploreTransitiveDependencies lastTick = (\t -> { updated: accumulated (fst t), registry: snd t }) $
+exploreTransitiveDependencies lastTick = (\t -> { required: lastTick.required, updated: accumulated (fst t), registry: snd t }) $
   lastTick.registry # traverseWithIndex \package -> traverseWithIndex \version deps ->
     let
       updateOne depName depRange = case Map.isEmpty (unwrap (getPackageRange lastTick.updated depName depRange)) of
@@ -299,7 +301,7 @@ exploreTransitiveDependencies lastTick = (\t -> { updated: accumulated (fst t), 
       Tuple (Disj peek) newDeps = foldMapWithIndex updateOne deps
       -- keep GC churn down by re-using old deps if nothing changed, maybe?
       dependencies = if peek then deps <> newDeps else deps
-      updated = case peek && majorUpdate deps dependencies of
+      updated = case peek && majorUpdate lastTick.required deps dependencies of
         true -> doubleton package version dependencies
         false -> mempty
     in Tuple updated dependencies
@@ -345,15 +347,18 @@ fixEqM f = join go
 -- dependencies should have already caught that update. So what we look for
 -- is either a new transitive dependency picked up (which the parent will need
 -- to incorporate) or newly failing to solve.
-majorUpdate :: SemigroupMap PackageName Intersection -> SemigroupMap PackageName Intersection -> Boolean
-majorUpdate (SemigroupMap orig) updated =
+majorUpdate :: SemigroupMap PackageName Intersection -> SemigroupMap PackageName Intersection -> SemigroupMap PackageName Intersection -> Boolean
+majorUpdate (SemigroupMap required) (SemigroupMap orig) updated =
   let
     minor = { added: false, failedAlready: false, failedNow: false }
     -- TODO: short-circuit on `added = true`??
     info :: { added :: Boolean, failedNow :: Boolean, failedAlready :: Boolean }
     info = updated # anyWithIndex \package range ->
       case Map.lookup package orig of
-        Nothing -> minor { added = true }
+        Nothing ->
+          case Map.lookup package required of
+            Nothing -> minor { added = true }
+            Just range' -> minor { added = lowerBound range > lowerBound range' || upperBound range < upperBound range' }
         Just r -> minor { failedAlready = not good r, failedNow = not good range }
   in case info of
     { added: true } -> true
