@@ -164,6 +164,11 @@ lowerBound :: forall r x y.
   Newtype x Sourced => r -> Version
 lowerBound = unwrap >>> _.lower >>> unwrap >>> \(Sourced v _) -> v
 
+wouldUpdate :: forall r x y.
+  Newtype r { lower :: x, upper :: y } =>
+  Newtype x Sourced => Newtype y Sourced => r -> r -> Boolean
+wouldUpdate i j = lowerBound i > lowerBound j || upperBound i < upperBound j
+
 good :: forall r x y.
   Newtype r { lower :: x, upper :: y } =>
   Newtype x Sourced => Newtype y Sourced => r -> Boolean
@@ -226,9 +231,12 @@ gatherReachable { registry, required } =
   in trace' [show (Map.size (unwrap reachable)), " reachable packages with ", show (sum (Map.size <<< unwrap <$> reachable)), " versions"] reachable
 
 addFrom :: SemigroupMap PackageName Intersection -> SemigroupMap PackageName Intersection -> SemigroupMap PackageName Intersection
-addFrom (SemigroupMap required) = mapWithIndex \package -> case Map.lookup package required of
-  Nothing -> identity
-  Just i -> (_ <> i)
+addFrom (SemigroupMap required) = over SemigroupMap $ Map.mapMaybeWithKey \package -> case Map.lookup package required of
+  Nothing -> Just
+  Just i -> \j ->
+    if j `wouldUpdate` i
+      then Just (j <> i)
+      else Nothing
 
 withReachable :: forall r. RR r -> RR r
 withReachable r = r { registry = map (addFrom r.required) <$> gatherReachable r }
