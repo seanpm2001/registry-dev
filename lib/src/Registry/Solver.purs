@@ -597,7 +597,7 @@ solveFull ::
   , required :: SemigroupMap PackageName Intersection
   } ->
   Either SolverErrors (Map PackageName Version)
-solveFull = (perf1' "^^^ solveFull" (solveAux 0 false)) <<< solveSeed <<< (perf1 "withReachable0" withReachable)
+solveFull = (perf1' "^^^ solveFull" (solveAux 0 false)) <<< fst <<< applySingles <<< solveSeed <<< (perf1 "withReachable0" withReachable)
   where
   solveAux ::
     Int ->
@@ -631,10 +631,9 @@ solveFull = (perf1' "^^^ solveFull" (solveAux 0 false)) <<< solveSeed <<< (perf1
   applySingles r =
     let
       rScanned = withInRangeU r
-      applySingle _ acc _ = acc
       applySingle package acc (SemigroupMap versions)
         | Map.size versions == 1
-        , Map.member package (unwrap r.updated)
+        , maybe 0 (Map.size <<< unwrap) (Map.lookup package (unwrap r.registry)) > 1
         , Just { key: version, value: dependencies } <- Map.findMax versions =
           trace' [ "Sole version ", PackageName.print package, "@", Version.printVersion version ] $
           Just (applyPackage (fromMaybe r acc) package version dependencies)
