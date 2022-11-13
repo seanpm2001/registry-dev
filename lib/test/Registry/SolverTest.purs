@@ -8,10 +8,9 @@ import Data.Filterable (partitionMap)
 import Data.Foldable (foldMap, sum)
 import Data.FoldableWithIndex (foldMapWithIndex)
 import Data.FunctorWithIndex (mapWithIndex)
-import Data.List ((:))
 import Data.Map (SemigroupMap(..))
 import Data.Map as Map
-import Data.Newtype (unwrap, wrap)
+import Data.Newtype (unwrap)
 import Data.String.CodeUnits as String
 import Effect.Console (time, timeEnd)
 import Effect.Unsafe (unsafePerformEffect)
@@ -129,7 +128,7 @@ main = launchAff_ do
   writeTextFile UTF8 "unsolvables.txt" unsolvables
   writeTextFile UTF8 "notsolved.txt" (fst not_solved)
   writeTextFile UTF8 "solved.txt" (snd not_solved)
-  -- writeJsonFile "retransitive.json" (diff reg (Solver.exploreAllTransitiveDependencies reg))
+  writeJsonFile "retransitive.json" (diff reg (Solver.exploreAllTransitiveDependencies reg))
   pure unit
   -- perf "transitivize" \_ -> Solver.exploreAllTransitiveDependencies r0
   {-

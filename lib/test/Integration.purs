@@ -9,10 +9,7 @@ import Control.Monad.State as State
 import Data.Array as Array
 import Data.Map as Map
 import Data.String as String
-import Data.Time.Duration (Milliseconds(..))
-import Effect.Aff as Aff
 import Effect.Exception as Exception
-import Effect.Unsafe (unsafePerformEffect)
 import Foreign.Git as Git
 import Foreign.Tmp as Tmp
 import Node.ChildProcess as NodeProcess
@@ -51,8 +48,8 @@ tests = launchAff_ do
   { solverIndex, solutions } <- setup
 
   runSpec' (defaultConfig { timeout = Nothing }) [ consoleReporter ] do
-    -- Spec.describe "Solves core packages" do
-    --   mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript" solutions
+    Spec.describe "Solves core packages" do
+      mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript" solutions
 
     Spec.describe "Solves contrib packages" do
       mkTest solverIndex $ unsafeFromJust $ Map.lookup "purescript-contrib" solutions
@@ -155,14 +152,13 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
         solve package version manifest bower.manifestSolution
   where
   solve package version dependencies solution = do
+    pure unit
     let
       name = PackageName.print package <> "@" <> Version.printVersion version
       isNoVersionsError = case _ of
         Solver.Conflicts es ->
           es # any \i -> Solver.upperBound i > Solver.lowerBound i
         _ -> false
-
-    let _ = unsafePerformEffect $ log $ "%%% Solving " <> name <> " %%%"
 
     case Solver.solve solverIndex dependencies of
       -- If we can't provide a solution because no versions are available in
@@ -181,4 +177,9 @@ mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
       -- If we found a solution then we passed the test.
       -- TODO: We can also check that our solution produces versions as
       -- high as those produced by Bower, if we want.
-      Right _ -> pure unit
+      Right ourSolution -> do
+        forWithIndex_ dependencies \dependency range ->
+          case Map.lookup dependency ourSolution of
+            Just depVersion ->
+              depVersion `Assert.shouldSatisfy` Version.rangeIncludes range
+            Nothing -> Assert.fail $ "Missing dependency " <> PackageName.print dependency

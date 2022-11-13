@@ -7,7 +7,6 @@ import Data.Array as Array
 import Data.Foldable (foldMap)
 import Data.Map as Map
 import Data.Newtype (unwrap)
-import Data.String (stripPrefix)
 import Data.String as String
 import Effect.Console (time, timeEnd)
 import Effect.Unsafe (unsafePerformEffect)
@@ -206,10 +205,9 @@ main = launchAff_ do
       notsolvedTxt <- readTextFile UTF8 "notsolved.txt"
       let notsolveds = notsolvedTxt # notsolvedP
       for_ notsolveds \(Tuple package version) -> do
-        when (isNothing $ stripPrefix (String.Pattern "aws-") (show package)) do
-          let versions = unsafeFromJust $ Map.lookup package registry
-          let deps = unsafeFromJust $ Map.lookup version versions
-          test registry package version deps
+        let versions = unsafeFromJust $ Map.lookup package registry
+        let deps = unsafeFromJust $ Map.lookup version versions
+        test registry package version deps
     [package_versionS] | [packageS,versionS] <- String.split (String.Pattern "@") package_versionS -> do
       let
         package = unsafeFromRight $ PackageName.parse packageS
