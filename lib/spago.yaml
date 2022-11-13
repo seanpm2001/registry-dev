@@ -13,6 +13,7 @@ package:
     - parsing
     - prelude
     - strings
+    - validation
   test:
     main: Test.Registry
     dependencies:
