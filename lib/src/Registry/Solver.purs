@@ -644,8 +644,8 @@ solveFull = (perf1' "^^^ solveFull" (solveAux 0 false)) <<< fst <<< applySingles
   applyPackage r package version dependencies =
     let
       required = r.required <> soleVersionOf package version <> dependencies
-      updated = SemigroupMap $ Map.singleton package $ SemigroupMap $ Map.singleton version $ dependencies
-    in { required, registry: r.registry, updated: r.updated <> updated }
+      updated = maybe identity (Map.insert package) $ Map.lookup package (unwrap r.registry)
+    in { required, registry: r.registry, updated: over SemigroupMap updated r.updated }
   solvePackage i r package version dependencies =
     let indent = power "  " i in
     let _ = trace [ indent, "TRYING ", PackageName.print package, "@", Version.printVersion version ] unit in
