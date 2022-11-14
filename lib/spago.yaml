@@ -14,6 +14,7 @@ package:
     - prelude
     - strings
     - validation
+    - variant
   test:
     main: Test.Registry
     dependencies:

@@ -6,10 +6,14 @@ import Control.Monad.Except (runExceptT)
 import Data.Array as Array
 import Data.Array.NonEmpty as NEA
 import Data.Either (isLeft)
+import Data.Foldable (foldMap)
 import Data.Map as Map
 import Data.Newtype (unwrap)
 import Data.String.NonEmpty as NES
 import Data.Validation.Semigroup as Validation
+import Data.Variant (Variant)
+import Data.Variant as Variant
+import Effect.Ref as Ref
 import Foreign.FastGlob as FastGlob
 import Node.FS.Aff as FS
 import Node.FS.Stats as FS.Stats
@@ -25,12 +29,11 @@ import Registry.Owner (Owner)
 import Registry.PackageName (PackageName)
 import Registry.PackageName as PackageName
 import Registry.Solver as Solver
+import Type.Prelude (Proxy(..))
 import Type.Row (type (+))
 
 type OperationEnv m =
-  { onStart :: PublishChecksStarted
-  , onError :: {}
-  , onSuccess :: {}
+  { handlers :: CheckHandlers
   , registryMetadata :: Map PackageName Metadata
   , registryIndex :: ManifestIndex
   , detectLicense :: FilePath -> License -> m (Either String License)
@@ -54,41 +57,106 @@ type OperationEnv m =
 -- - 
 -- - 
 
-type LocationExists r m a = ( locationExists :: r -> m Unit | a )
-type LocationUnique r m a = ( locationUnique :: r -> m Unit | a )
-type UpdateLocationMatches r m a = ( updateLocationMatches :: r -> m Unit | a )
-type PursFilesExist r m a = ( pursFilesExist :: r -> m Unit | a )
+_locationExists = Proxy :: Proxy "locationExists"
+_locationUnique = Proxy :: Proxy "locationUnique"
+_updateLocationMatches = Proxy :: Proxy "updateLocationMatches"
+_pursFilesExist = Proxy :: Proxy "pursFilesExist"
 
-type PublishChecksNotification r m =
-  Record
-    ( LocationExists r m
-    + LocationUnique r m
-    + UpdateLocationMatches r m
-    + PursFilesExist r m 
-    + ()
-    )
+locationExists :: forall a v. a -> Variant (locationExists :: a | v)
+locationExists = Variant.inj _locationExists
 
-type PublishChecksStarted m = PublishChecksNotification Unit m
+locationUnique :: forall a v. a -> Variant (locationUnique :: a | v)
+locationUnique = Variant.inj _locationUnique
 
-type PublishChecksSucceeded m = PublishChecksNotification Unit m
+updateLocationMatches :: forall a v. a -> Variant (updateLocationMatches :: a | v)
+updateLocationMatches = Variant.inj _updateLocationMatches
 
-type PublishChecksFailed m =
-  Record
-    ( LocationExists Unit m
-    + LocationUnique (Tuple PackageName Metadata) m
-    + UpdateLocationMatches Unit m
-    + PursFilesExist Unit m 
-    + ()
-    )
+type CheckNotification =
+  ( locationExists :: Unit
+  , locationUnique :: Unit
+  , updateLocationMatches :: Unit
+  , pursFilesExist :: Unit
+  )
 
---displayStarted ::
---displaySucceeded ::
---display ::
+type CheckFailure =
+  ( locationExists :: Unit
+  , locationUnique :: { packageName :: PackageName, location :: Location }
+  , updateLocationMatches :: { old :: Location, new :: Location }
+  , pursFilesExist :: Unit
+  ) 
+
+type CheckNotificationHandler m =
+  { locationExists :: Unit -> m Unit
+  , locationUnique :: Unit -> m Unit
+  , updateLocationMatches :: Unit -> m Unit
+  , pursFilesExist :: Unit -> m Unit
+  }
+
+onStart :: forall m. MonadEffect m => OperationEnv m -> Variant CheckNotification -> m Unit
+onStart env =
+  Variant.case_
+    # Variant.on _locationExists (\reason -> liftEffect (foldMap (Ref.write (Just (Started reason))) env.handlers.locationExists))
+    # Variant.on _locationUnique (\reason -> liftEffect (foldMap (Ref.write (Just (Started reason))) env.handlers.locationUnique))
+    # Variant.on _updateLocationMatches (\reason -> liftEffect (foldMap (Ref.write (Just (Started reason))) env.handlers.updateLocationMatches))
+    # Variant.on _pursFilesExist (\reason -> liftEffect (foldMap (Ref.write (Just (Started reason))) env.handlers.pursFilesExist))
+
+onSuccess :: forall m. MonadEffect m => OperationEnv m -> Variant CheckNotification -> m Unit
+onSuccess env =
+  Variant.case_
+    # Variant.on _locationExists (\reason -> liftEffect (foldMap (Ref.write (Just (Finished reason))) env.handlers.locationExists))
+    # Variant.on _locationUnique (\reason -> liftEffect (foldMap (Ref.write (Just (Finished reason))) env.handlers.locationUnique))
+    # Variant.on _updateLocationMatches (\reason -> liftEffect (foldMap (Ref.write (Just (Finished reason))) env.handlers.updateLocationMatches))
+    # Variant.on _pursFilesExist (\reason -> liftEffect (foldMap (Ref.write (Just (Finished reason))) env.handlers.pursFilesExist))
+
+onError :: forall m. MonadEffect m => OperationEnv m -> Variant CheckFailure -> m Unit
+onError env =
+  Variant.case_
+    # Variant.on _locationExists (\reason -> liftEffect (foldMap (Ref.write (Just (Failed reason))) env.handlers.locationExists))
+    # Variant.on _locationUnique (\reason -> liftEffect (foldMap (Ref.write (Just (Failed reason))) env.handlers.locationUnique))
+    # Variant.on _updateLocationMatches (\reason -> liftEffect (foldMap (Ref.write (Just (Failed reason))) env.handlers.updateLocationMatches))
+    # Variant.on _pursFilesExist (\reason -> liftEffect (foldMap (Ref.write (Just (Failed reason))) env.handlers.pursFilesExist))
+
+-- TODO: Are started & finished always Unit?
+data CheckStatus started finished failed
+  = Started started
+  | Finished finished
+  | Failed failed
+
+type CheckHandlers =
+  { locationExists :: Maybe (Ref (Maybe (CheckStatus Unit Unit Unit)))
+  , locationUnique :: Maybe (Ref (Maybe (CheckStatus Unit Unit { packageName :: PackageName, location :: Location })))
+  , updateLocationMatches :: Maybe (Ref (Maybe (CheckStatus Unit Unit { old :: Location, new :: Location })))
+  , pursFilesExist :: Maybe (Ref (Maybe (CheckStatus Unit Unit Unit)))
+  }
+
+noopCheckHandlers :: CheckHandlers
+noopCheckHandlers =
+  { locationExists: Nothing
+  , locationUnique: Nothing
+  , updateLocationMatches: Nothing
+  , pursFilesExist: Nothing
+  }
+
+displayStarted :: Variant CheckNotification -> String
+displayStarted = 
+  Variant.case_
+    # Variant.on _locationExists (\_ -> "Checking that location exists in PublishData...")
+    # Variant.on _locationUnique (\_ -> "")
+    # Variant.on _updateLocationMatches (\_ -> "")
+    # Variant.on _pursFilesExist (\_ -> "")
+
+displayFailure :: Variant CheckFailure -> String
+displayFailure =
+  Variant.case_
+    # Variant.on _locationExists (\_ -> "Location doesn't exist in PublishData.")
+    # Variant.on _locationUnique (\{ packageName } -> "Location already taken by " <> PackageName.print packageName <> ".")
+    # Variant.on _updateLocationMatches (\_ -> "")
+    # Variant.on _pursFilesExist (\_ -> "")
 
 data OperationError
   = PublishMissingLocation
-  | PublishLocationNotUnique
-  | UpdateLocationMismatch
+  | PublishLocationNotUnique { packageName :: PackageName, location :: Location }
+  | UpdateLocationMismatch { old :: Location, new :: Location }
   | MissingPursFiles
   | PackageNameMismatch
   | MetadataPackageUpload
@@ -113,16 +181,34 @@ validateUnpublish _ = pure unit
 validateTransfer :: forall m. Monad m => OperationEnv m -> m Unit
 validateTransfer _ = pure unit
 
-verifyPublishPayload :: forall m. Monad m => OperationEnv m -> PublishData -> m (Either OperationError Metadata)
+verifyPublishPayload :: forall m. MonadEffect m => OperationEnv m -> PublishData -> m (Either OperationError Metadata)
 verifyPublishPayload env { name, location: mbLocation } = runExceptT do
+  lift $ onStart env (locationExists unit)
   case Map.lookup name env.registryMetadata of
     Nothing -> case mbLocation of
-      Nothing -> throwError PublishMissingLocation
-      Just location | not (locationIsUnique location env.registryMetadata) -> throwError PublishLocationNotUnique
-      Just location -> pure $ Metadata { location, owners: Nothing, published: Map.empty, unpublished: Map.empty }
-    Just metadata -> case mbLocation of
-      Just location | (unwrap metadata).location /= location -> throwError UpdateLocationMismatch
-      _ -> pure metadata
+      Nothing -> do
+        lift $ onError env (locationExists unit)
+        throwError PublishMissingLocation
+      Just location -> do
+        lift $ onSuccess env (locationExists unit)
+        lift $ onStart env (locationUnique unit)
+        case locationIsUnique location env.registryMetadata of
+          Just packageName -> do
+            lift $ onError env (locationUnique { packageName, location })
+            throwError (PublishLocationNotUnique { packageName, location })
+          Nothing -> do
+            lift $ onSuccess env (locationUnique unit)
+            pure $ Metadata { location, owners: Nothing, published: Map.empty, unpublished: Map.empty }
+    Just metadata -> do
+      lift $ onSuccess env (locationExists unit)
+      lift $ onStart env (updateLocationMatches unit)
+      case mbLocation of
+        Just location | (unwrap metadata).location /= location -> do
+          lift $ onError env (updateLocationMatches { old: (unwrap metadata).location, new: location })
+          throwError (UpdateLocationMismatch { old: (unwrap metadata).location, new: location })
+        _ -> do
+          lift $ onSuccess env (updateLocationMatches unit)
+          pure metadata
 
 verifyPursFiles :: forall m. Monad m => MonadAff m => OperationEnv m -> m (Either OperationError Manifest)
 verifyPursFiles env = runExceptT do
@@ -257,5 +343,5 @@ maxPackageBytes = 2_000_000.0
 warnPackageBytes :: Number
 warnPackageBytes = 200_000.0
 
-locationIsUnique :: Location -> Map PackageName Metadata -> Boolean
-locationIsUnique location = Map.isEmpty <<< Map.filter (eq location <<< _.location <<< unwrap)
+locationIsUnique :: Location -> Map PackageName Metadata -> Maybe PackageName
+locationIsUnique location = map _.key <<< Map.findMin <<< Map.filter (eq location <<< _.location <<< unwrap)
