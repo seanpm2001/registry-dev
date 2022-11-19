@@ -28,6 +28,7 @@ package:
     - functions
     - graphs
     - http-methods
+    - httpurple
     - identity
     - integers
     - interpolate
@@ -66,3 +67,4 @@ package:
     dependencies:
       - spec
       - argonaut-codecs
+
