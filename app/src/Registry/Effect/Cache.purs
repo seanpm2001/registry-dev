@@ -2,6 +2,7 @@ module Registry.Effect.Cache where
 
 import Prelude
 
+import Data.Argonaut.Core (Json)
 import Data.Argonaut.Core as Argonaut.Core
 import Data.Argonaut.Parser as Argonaut.Parser
 import Data.Codec.Argonaut (JsonCodec)
@@ -10,9 +11,21 @@ import Data.Const (Const(..))
 import Data.Either (hush)
 import Data.Exists (Exists)
 import Data.Exists as Exists
-import Data.Maybe (Maybe)
+import Data.Map (Map)
+import Data.Map as Map
+import Data.Maybe (Maybe(..), maybe')
+import Data.String as String
+import JSURI as JSURI
+import Node.Encoding (Encoding(..))
+import Node.FS.Aff as FS.Aff
 import Node.Path (FilePath)
+import Partial.Unsafe (unsafeCrashWith)
+import Registry.Effect.Log (LOG)
 import Run (AFF, Run)
+import Run as Run
+import Run.Reader as Run.Reader
+import Run.State (STATE)
+import Run.State as Run.State
 import Type.Proxy (Proxy(..))
 import Type.Row (type (+))
 
@@ -35,17 +48,50 @@ data Cache key a
   | Put (forall void. key Const void) a
   | Delete (key Ignore a)
 
-derive instance (Functor (key Reply), Functor (key Ignore)) => Functor (Cache key)
+derive instance (Functor (k Reply), Functor (k Ignore)) => Functor (Cache k)
 
 type CacheKey :: ((Type -> Type -> Type) -> Type -> Type) -> Type -> Type
-type CacheKey key a = forall c b. c a b -> key c b
+type CacheKey k a = forall c b. c a b -> k c b
 
+-- | Get a value from the cache, given an appropriate cache key. This function
+-- | is useful for defining a concrete 'get' for a user-defined key type:
+-- |
+-- | ```purs
+-- | import Registry.Effect.Cache
+-- |
+-- | data Key c a = ManifestFile PackageName Version (c Manifest a)
+-- |
+-- | getItem :: forall a r. CacheKey Key a -> Run (CACHE Key + r) (Maybe a)
+-- | getItem key = Run.lift _cache (get key)
+-- | ```
 get :: forall k a. CacheKey k a -> Cache k (Maybe a)
 get key = Get (key (Reply identity))
 
+-- | Put a value in the cache, given an appropriate cache key. This function
+-- | is useful for defining a concrete 'put' for a user-defined key type:
+-- |
+-- | ```purs
+-- | import Registry.Effect.Cache
+-- |
+-- | data Key c a = ManifestFile PackageName Version (c Manifest a)
+-- |
+-- | putItem :: forall a r. CacheKey Key a -> Run (CACHE Key + r) (Maybe a)
+-- | putItem key = Run.lift _cache (get key)
+-- | ```
 put :: forall k a. CacheKey k a -> a -> Cache k Unit
 put key value = Put (key (Const value)) unit
 
+-- | Delete a key from the cache, given an appropriate cache key. This function
+-- | is useful for defining a concrete 'delete' for a user-defined key type:
+-- |
+-- | ```purs
+-- | import Registry.Effect.Cache
+-- |
+-- | data Key c a = ManifestFile PackageName Version (c Manifest a)
+-- |
+-- | deleteItem :: forall a r. CacheKey Key a -> Run (CACHE Key + r) (Maybe a)
+-- | deleteItem key = Run.lift _cache (get key)
+-- | ```
 delete :: forall k a. CacheKey k a -> Cache k Unit
 delete key = Delete (key (Ignore unit))
 
@@ -53,45 +99,66 @@ type CACHE key r = (cache :: Cache key | r)
 
 _cache = Proxy :: Proxy "cache"
 
-type FileSystemKey a =
-  { path :: FilePath
+type JsonKey a =
+  { id :: String
   , codec :: JsonCodec a
   }
 
-type FileSystemKeyHandler key = forall b z. key z b -> FileSystem z b
+safePath :: String -> FilePath
+safePath id =
+  maybe' (\_ -> unsafeCrashWith ("Unable to encode " <> id <> " as a safe file path.")) identity
+    $ JSURI.encodeURIComponent
+    $ String.replaceAll (String.Pattern "@") (String.Replacement "$")
+    $ String.replaceAll (String.Pattern "/") (String.Replacement "_")
+    $ String.replaceAll (String.Pattern " ") (String.Replacement "__") id
 
-data FileSystemBox :: (Type -> Type -> Type) -> Type -> Type -> Type
-data FileSystemBox z b a = FileSystem (FileSystemKey a) (z a b)
+type JsonKeyHandler key = forall b z. key z b -> JsonEncoded z b
 
-type FileSystem z b = Exists (FileSystemBox z b)
+data JsonEncodedBox :: (Type -> Type -> Type) -> Type -> Type -> Type
+data JsonEncodedBox z b a = JsonKey (JsonKey a) (z a b)
 
-runCacheFileSystem
+type JsonEncoded z b = Exists (JsonEncodedBox z b)
+
+-- | Run a cache in memory only.
+handleCachePure :: forall key a r. JsonKeyHandler key -> Cache key a -> Run (STATE (Map String Json) + r) a
+handleCachePure handler = case _ of
+  Get key -> handler key # Exists.runExists \(JsonKey { id, codec } (Reply reply)) -> do
+    state <- Run.State.get
+    pure $ reply $ hush <<< CA.decode codec =<< Map.lookup id state
+
+  Put key next -> handler key # Exists.runExists \(JsonKey { id, codec } (Const value)) -> do
+    Run.State.modify (Map.insert id (CA.encode codec value))
+    pure next
+
+  Delete key -> handler key # Exists.runExists \(JsonKey { id } (Ignore next)) -> do
+    Run.State.modify (Map.delete id)
+    pure next
+
+-- | Run a cache backed by the file system. The cache will try to minimize
+-- | writes and reads to the file system by storing data in memory when possible.
+handleCacheFileSystem
   :: forall key a r
-   . FileSystemKeyHandler key
+   . JsonKeyHandler key
   -> Cache key a
-  -> Run (CACHE key + AFF + r) a
-runCacheFileSystem handler = case _ of
-  Get key -> handler key # Exists.runExists \(FileSystem { path, codec } (Reply reply)) -> do
-    let decoded = hush <<< CA.decode codec =<< hush (Argonaut.Parser.jsonParser "")
-    pure (reply decoded)
+  -> Run (LOG + AFF + r) a
+handleCacheFileSystem handler = Run.Reader.runReader Map.empty <<< case _ of
+  -- TODO: Expire entries after they've not been fetched for 30 seconds?
+  Get key -> handler key # Exists.runExists \(JsonKey { id, codec } (Reply reply)) -> do
+    let decode = hush <<< CA.decode codec
+    memory <- Run.Reader.ask
+    case Map.lookup id memory of
+      Nothing -> do
+        contents <- Run.liftAff $ FS.Aff.readTextFile UTF8 (safePath id)
+        pure $ reply $ decode =<< hush (Argonaut.Parser.jsonParser contents)
+      Just json ->
+        pure $ reply $ decode json
 
-  Put key next -> handler key # Exists.runExists \(FileSystem { path, codec } (Const value)) -> do
-    let encoded = Argonaut.Core.stringify $ CA.encode codec value
+  -- TODO: Record the current time? (Requires adding 'CacheEntry' to 'Reply')
+  Put key next -> handler key # Exists.runExists \(JsonKey { id, codec } (Const value)) -> do
+    let encoded = Argonaut.Core.stringify (CA.encode codec value)
+    Run.liftAff $ FS.Aff.writeTextFile UTF8 (safePath id) encoded
     pure next
 
-  Delete key -> handler key # Exists.runExists \(FileSystem { path, codec } (Ignore next)) -> do
+  Delete key -> handler key # Exists.runExists \(JsonKey { id } (Ignore next)) -> do
+    Run.liftAff $ FS.Aff.rm (safePath id)
     pure next
-
-----------
--- Example interpreter, using key
-----------
-
-data RegistryCache :: (Type -> Type -> Type) -> Type -> Type
-data RegistryCache k a = ConfigKey Int (k Int a)
-
-registryCacheKeyHandler :: FileSystemKeyHandler RegistryCache
-registryCacheKeyHandler = case _ of
-  ConfigKey id next -> Exists.mkExists $ FileSystem { path: show id, codec: CA.int } next
-
-runCache :: forall a r. Cache RegistryCache a -> Run (CACHE RegistryCache + AFF + r) a
-runCache = runCacheFileSystem registryCacheKeyHandler

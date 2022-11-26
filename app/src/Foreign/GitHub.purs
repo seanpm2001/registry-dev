@@ -12,22 +12,23 @@ module Foreign.GitHub
   , Tag
   , Team
   , TeamMember
+  , addressCodec
   , closeIssue
   , createComment
+  , decodeEvent
   , getCommitDate
   , getContent
   , getRateLimit
   , getRefCommit
+  , githubErrorCodec
   , listTags
   , listTeamMembers
   , mkOctokit
   , parseRepo
   , printGitHubError
   , printRateLimit
-  , decodeEvent
-  , githubErrorCodec
+  , printRoute
   , tagCodec
-  , addressCodec
   ) where
 
 import Registry.App.Prelude
@@ -278,6 +279,9 @@ newtype Route = Route String
 
 derive newtype instance Eq Route
 derive newtype instance Ord Route
+
+printRoute :: Route -> String
+printRoute (Route route) = route
 
 foreign import requestImpl :: forall args r. EffectFn6 Octokit Route (Object String) (Record args) (Object Json -> r) (Json -> r) (Promise r)
 

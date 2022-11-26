@@ -2,7 +2,7 @@ module Registry.Effect.Index where
 
 import Registry.App.Prelude
 
-data IndexF a
+data Index a
   = ReadMetadataIndex (Map PackageName Metadata -> a)
   | ReadMetadata PackageName (Maybe Metadata -> a)
   | WriteMetadata PackageName Metadata a

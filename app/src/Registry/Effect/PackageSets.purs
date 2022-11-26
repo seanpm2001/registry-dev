@@ -10,8 +10,8 @@ type SequentialUpgradeResult =
   , result :: PackageSet
   }
 
-data PackageSetF a
-  = ReadPackageSets (Map Version PackageSet -> a)
-  | ReadLatestPackageSet (Maybe PackageSet -> a)
+data PackageSets a
+  = ReadAll (Map Version PackageSet -> a)
+  | ReadLatest (Maybe PackageSet -> a)
   | UpgradeAtomic PackageSet Version (Map PackageName (Maybe Version)) (Either (Map PackageName (Maybe Version)) PackageSet -> a)
   | UpgradeSequential PackageSet Version (Map PackageName (Maybe Version)) (SequentialUpgradeResult -> a)

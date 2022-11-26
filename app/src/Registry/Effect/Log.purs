@@ -2,7 +2,8 @@ module Registry.Effect.Log where
 
 import Registry.App.Prelude hiding (log)
 
-import Run (Run)
+import Effect.Class.Console as Console
+import Run (AFF, EFFECT, Run)
 import Run as Run
 import Type.Proxy (Proxy(..))
 import Type.Row (type (+))
@@ -35,3 +36,22 @@ warn = log Warn
 
 error :: forall r. String -> Run (LOG + r) Unit
 error = log Error
+
+handleLogGitHub :: forall a r. Log a -> Run (AFF + r) a
+handleLogGitHub = Run.liftAff <<< case _ of
+  Log level message next -> case level of
+    Debug -> do
+      Console.debug message
+      pure next
+
+    Info -> do
+      Console.info message
+      pure next
+
+    Warn -> do
+      Console.warn message
+      pure next
+
+    Error -> do
+      Console.error message
+      pure next
