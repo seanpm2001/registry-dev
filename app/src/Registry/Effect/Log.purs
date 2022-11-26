@@ -2,8 +2,11 @@ module Registry.Effect.Log where
 
 import Registry.App.Prelude hiding (log)
 
+import Control.Monad.Except as Except
 import Effect.Class.Console as Console
-import Run (AFF, EFFECT, Run)
+import Foreign.GitHub (IssueNumber, Octokit)
+import Foreign.GitHub as GitHub
+import Run (AFF, Run)
 import Run as Run
 import Type.Proxy (Proxy(..))
 import Type.Row (type (+))
@@ -37,21 +40,34 @@ warn = log Warn
 error :: forall r. String -> Run (LOG + r) Unit
 error = log Error
 
-handleLogGitHub :: forall a r. Log a -> Run (AFF + r) a
-handleLogGitHub = Run.liftAff <<< case _ of
+-- | Handle the LOG effect in the GitHub environment, logging debug statements
+-- | to the console and others to the GitHub issue associated with the execution
+handleLogGitHub
+  :: forall a r
+   . Octokit
+  -> IssueNumber
+  -> Log a
+  -> Run (AFF + r) a
+handleLogGitHub octokit issue = case _ of
   Log level message next -> case level of
-    Debug -> do
+    Debug -> Run.liftAff do
       Console.debug message
       pure next
 
-    Info -> do
+    Info -> Run.liftAff do
       Console.info message
-      pure next
+      Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
+        Left err -> unsafeCrashWith (GitHub.printGitHubError err)
+        Right _ -> pure next
 
-    Warn -> do
+    Warn -> Run.liftAff do
       Console.warn message
-      pure next
+      Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
+        Left err -> unsafeCrashWith (GitHub.printGitHubError err)
+        Right _ -> pure next
 
-    Error -> do
+    Error -> Run.liftAff do
       Console.error message
-      pure next
+      Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
+        Left err -> unsafeCrashWith (GitHub.printGitHubError err)
+        Right _ -> pure next
