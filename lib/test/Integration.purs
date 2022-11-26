@@ -101,7 +101,7 @@ select k m = case Map.lookup k m of
   Just v -> Map.singleton k v
   Nothing -> Map.empty
 
-setup :: Aff { solverIndex :: Solver.Dependencies, solutions :: Map String (Map PackageName (Map Version { bower :: BowerSolved, manifest :: Map PackageName Range })) }
+setup :: Aff { solverIndex :: Solver.DependencyIndex, solutions :: Map String (Map PackageName (Map Version { bower :: BowerSolved, manifest :: Map PackageName Range })) }
 setup = do
   tmp <- liftEffect Tmp.mkTmpDir
 
@@ -127,12 +127,12 @@ setup = do
   log "Doing tests …"
 
   let
-    solverIndex :: Solver.Dependencies
+    solverIndex :: Solver.DependencyIndex
     solverIndex = map (map (\(Manifest m) -> m.dependencies)) index
 
   pure { solverIndex, solutions: segmentedIndex }
 
-mkTest :: Solver.Dependencies -> Map PackageName (Map Version { bower :: BowerSolved, manifest :: Map PackageName Range }) -> Spec.Spec Unit
+mkTest :: Solver.DependencyIndex -> Map PackageName (Map Version { bower :: BowerSolved, manifest :: Map PackageName Range }) -> Spec.Spec Unit
 mkTest solverIndex pkgs = void $ forWithIndex pkgs \package versions -> do
   Spec.describe ("Solves " <> PackageName.print package) do
     pure unit
