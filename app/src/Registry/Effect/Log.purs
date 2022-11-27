@@ -1,11 +1,12 @@
 module Registry.Effect.Log where
 
-import Registry.App.Prelude hiding (log)
+import Registry.App.Prelude
 
 import Control.Monad.Except as Except
 import Effect.Class.Console as Console
 import Foreign.GitHub (IssueNumber, Octokit)
 import Foreign.GitHub as GitHub
+import Node.Process as Process
 import Run (AFF, Run)
 import Run as Run
 import Type.Proxy (Proxy(..))
@@ -39,6 +40,11 @@ warn = log Warn
 
 error :: forall r. String -> Run (LOG + r) Unit
 error = log Error
+
+die :: forall r a. String -> Run (LOG + AFF + r) a
+die message = do
+  error message
+  Run.liftAff $ liftEffect $ Process.exit 1
 
 -- | Handle the LOG effect in the GitHub environment, logging debug statements
 -- | to the console and others to the GitHub issue associated with the execution
