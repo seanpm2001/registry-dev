@@ -1,3 +1,4 @@
+-- TODO: Delete.
 module Registry.App.Cache
   ( Cache
   , CacheEntry

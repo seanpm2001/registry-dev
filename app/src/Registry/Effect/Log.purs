@@ -52,7 +52,7 @@ die message = do
 
 -- | Handle the LOG effect in the GitHub environment, logging debug statements
 -- | to the console only and others to both the console and the GitHub issue
--- | associated with the execution.
+-- | associated with the execution. Suitable for use in GitHub events.
 handleLogGitHub :: forall a r. Octokit -> IssueNumber -> Log a -> Run (AFF + r) a
 handleLogGitHub octokit issue = case _ of
   Log level message next -> case level of
@@ -83,7 +83,8 @@ handleLogGitHub octokit issue = case _ of
         liftEffect $ Process.exit 1
       Right _ -> pure unit
 
--- | Write logs to the console and to the given logfile.
+-- | Write logs to the console and to the given logfile. Suitable for use in
+-- | local runs of the registry tools.
 handleLogFile :: forall a r. FilePath -> Log a -> Run (AFF + r) a
 handleLogFile logfile = case _ of
   Log level message next -> Run.liftAff case level of

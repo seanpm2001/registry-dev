@@ -1,3 +1,4 @@
+-- TODO: Move into legacy?
 module Registry.App.Types where
 
 import Prelude

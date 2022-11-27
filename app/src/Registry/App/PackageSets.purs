@@ -1,3 +1,4 @@
+-- TODO: Rewrite in terms of registry effects
 module Registry.App.PackageSets
   ( PackageSetBatchResult
   , commitMessage

@@ -14,6 +14,7 @@ module Registry.Metadata
   , PublishedMetadata
   , UnpublishedMetadata
   , codec
+  , packageMetadataPath
   , publishedMetadataCodec
   , unpublishedMetadataCodec
   ) where
@@ -30,11 +31,16 @@ import Data.Map (Map)
 import Data.Maybe (Maybe)
 import Data.Newtype (class Newtype)
 import Data.Profunctor as Profunctor
+import Node.Path (FilePath)
+import Node.Path as Path
+import Registry.Constants as Constants
 import Registry.Internal.Codec as Internal.Codec
 import Registry.Location (Location)
 import Registry.Location as Location
 import Registry.Owner (Owner)
 import Registry.Owner as Owner
+import Registry.PackageName (PackageName)
+import Registry.PackageName as PackageName
 import Registry.Sha256 (Sha256)
 import Registry.Sha256 as Sha256
 import Registry.Version (Version)
@@ -95,3 +101,8 @@ unpublishedMetadataCodec = CA.Record.object "UnpublishedMetadata"
   , reason: Internal.Codec.limitedString 300
   , unpublishedTime: Internal.Codec.iso8601DateTime
   }
+
+-- | Format the file path of the metadata of a given package from the root of
+-- | the registry repository.
+packageMetadataPath :: PackageName -> FilePath
+packageMetadataPath name = Path.concat [ Constants.packageMetadataDirectory, PackageName.print name <> ".json" ]

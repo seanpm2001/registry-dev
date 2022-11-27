@@ -1,3 +1,4 @@
+-- TODO: Rewrite using effects
 module Registry.App.API where
 
 import Registry.App.Prelude

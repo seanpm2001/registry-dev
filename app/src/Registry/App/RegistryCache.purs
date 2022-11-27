@@ -1,3 +1,4 @@
+-- TODO: Rename to 'Cache'
 module Registry.App.RegistryCache where
 
 import Registry.App.Prelude

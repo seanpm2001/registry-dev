@@ -1,3 +1,4 @@
+-- TODO: DELETE.
 module Registry.App.PackageIndex where
 
 import Registry.App.Prelude

@@ -10,6 +10,7 @@
 module Registry.PackageSet
   ( PackageSet(..)
   , codec
+  , packageSetPath
   ) where
 
 import Prelude
@@ -20,6 +21,9 @@ import Data.DateTime (Date)
 import Data.Map (Map)
 import Data.Newtype (class Newtype)
 import Data.Profunctor as Profunctor
+import Node.Path (FilePath)
+import Node.Path as Path
+import Registry.Constants as Constants
 import Registry.Internal.Codec as Internal.Codec
 import Registry.PackageName (PackageName)
 import Registry.Version (Version)
@@ -48,3 +52,8 @@ codec = Profunctor.wrapIso PackageSet $ CA.object "PackageSet"
   $ CA.recordProp (Proxy :: _ "published") Internal.Codec.iso8601Date
   $ CA.recordProp (Proxy :: _ "packages") (Internal.Codec.packageMap Version.codec)
   $ CA.record
+
+-- | Format the file path to the package set for the given package set version,
+-- | from the root of the registry repository.
+packageSetPath :: Version -> FilePath
+packageSetPath version = Path.concat [ Constants.packageSetsDirectory, Version.print version <> ".json" ]

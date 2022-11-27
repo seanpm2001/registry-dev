@@ -1,3 +1,4 @@
+-- TODO: Convert into an app monad based on effects
 module Registry.App.RegistryM where
 
 import Registry.App.Prelude
