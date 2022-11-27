@@ -3,10 +3,14 @@ module Registry.Effect.Log where
 import Registry.App.Prelude
 
 import Control.Monad.Except as Except
+import Data.Array as Array
+import Data.Formatter.DateTime as Formatter.DateTime
 import Effect.Class.Console as Console
 import Foreign.GitHub (IssueNumber, Octokit)
 import Foreign.GitHub as GitHub
+import Node.FS.Aff as FS.Aff
 import Node.Process as Process
+import Registry.Internal.Format as Internal.Format
 import Run (AFF, Run)
 import Run as Run
 import Type.Proxy (Proxy(..))
@@ -47,13 +51,9 @@ die message = do
   Run.liftAff $ liftEffect $ Process.exit 1
 
 -- | Handle the LOG effect in the GitHub environment, logging debug statements
--- | to the console and others to the GitHub issue associated with the execution
-handleLogGitHub
-  :: forall a r
-   . Octokit
-  -> IssueNumber
-  -> Log a
-  -> Run (AFF + r) a
+-- | to the console only and others to both the console and the GitHub issue
+-- | associated with the execution.
+handleLogGitHub :: forall a r. Octokit -> IssueNumber -> Log a -> Run (AFF + r) a
 handleLogGitHub octokit issue = case _ of
   Log level message next -> case level of
     Debug -> Run.liftAff do
@@ -62,18 +62,52 @@ handleLogGitHub octokit issue = case _ of
 
     Info -> Run.liftAff do
       Console.info message
-      Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
-        Left err -> unsafeCrashWith (GitHub.printGitHubError err)
-        Right _ -> pure next
+      attemptComment message
+      pure next
 
     Warn -> Run.liftAff do
       Console.warn message
-      Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
-        Left err -> unsafeCrashWith (GitHub.printGitHubError err)
-        Right _ -> pure next
+      attemptComment message
+      pure next
 
     Error -> Run.liftAff do
       Console.error message
-      Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
-        Left err -> unsafeCrashWith (GitHub.printGitHubError err)
-        Right _ -> pure next
+      attemptComment message
+      pure next
+  where
+  attemptComment message =
+    Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
+      Left err -> do
+        Console.error "UNEXPECTED ERROR: Could not send comment to GitHub."
+        Console.error $ GitHub.printGitHubError err
+        liftEffect $ Process.exit 1
+      Right _ -> pure unit
+
+-- | Write logs to the console and to the given logfile.
+handleLogFile :: forall a r. FilePath -> Log a -> Run (AFF + r) a
+handleLogFile logfile = case _ of
+  Log level message next -> Run.liftAff case level of
+    Debug -> do
+      Console.debug message
+      writeTimestamped message
+      pure next
+
+    Info -> do
+      Console.info message
+      writeTimestamped message
+      pure next
+
+    Warn -> do
+      Console.warn message
+      writeTimestamped message
+      pure next
+
+    Error -> do
+      Console.error message
+      writeTimestamped message
+      pure next
+  where
+  writeTimestamped message = do
+    now <- liftEffect nowUTC
+    let formatted = Array.fold [ "[", Formatter.DateTime.format Internal.Format.iso8601DateTime now, "] ", message, "\n" ]
+    FS.Aff.appendTextFile UTF8 logfile formatted

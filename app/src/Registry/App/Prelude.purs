@@ -1,14 +1,16 @@
 module Registry.App.Prelude
-  ( fromJust'
+  ( formatPackageVersion
+  , fromJust'
   , guardA
   , mapKeys
   , module Either
   , module Extra
   , module Maybe
   , module Prelude
-  , module Registry.Types
   , module Registry.App.Types
+  , module Registry.Types
   , newlines
+  , nowUTC
   , partitionEithers
   , stripPureScriptPrefix
   , traverseKeys
@@ -16,7 +18,6 @@ module Registry.App.Prelude
   , unsafeFromRight
   , withBackoff
   , withBackoff'
-  , nowUTC
   ) where
 
 import Prelude
@@ -69,7 +70,9 @@ import Node.Encoding (Encoding(..)) as Extra
 import Node.Path (FilePath) as Extra
 import Partial.Unsafe (unsafeCrashWith) as Extra
 import Registry.App.Types (RawPackageName(..), RawVersion(..), RawVersionRange(..), rawPackageNameCodec, rawPackageNameMapCodec, rawVersionCodec, rawVersionMapCodec, rawVersionRangeCodec)
+import Registry.PackageName as PackageName
 import Registry.Types (License, Location(..), Manifest(..), ManifestIndex, Metadata(..), Owner(..), PackageName, PackageSet(..), PublishedMetadata, Range, Sha256, UnpublishedMetadata, Version)
+import Registry.Version as Version
 import Type.Row (type (+)) as Extra
 
 -- | Partition an array of `Either` values into failure and success  values
@@ -177,3 +180,7 @@ nowUTC = do
   offset <- Newtype.over Duration.Minutes negate <$> Now.getTimezoneOffset
   now <- Now.nowDateTime
   pure $ Maybe.fromMaybe now $ DateTime.adjust (offset :: Duration.Minutes) now
+
+-- | Format a package version as a string in the form 'name@X.Y.Z'
+formatPackageVersion :: PackageName -> Version -> String
+formatPackageVersion name version = Array.fold [ PackageName.print name, "@", Version.print version ]
