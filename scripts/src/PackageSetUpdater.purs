@@ -9,6 +9,7 @@ import Data.Map as Map
 import Data.String as String
 import Data.Time.Duration (Hours(..))
 import Effect.Aff as Aff
+import Effect.Class.Console as Console
 import Effect.Exception as Exception
 import Effect.Ref as Ref
 import Foreign.GitHub (GitHubToken(..))
@@ -32,12 +33,12 @@ derive instance Eq PublishMode
 
 main :: Effect Unit
 main = Aff.launchAff_ do
-  log "Loading env..."
+  Console.log "Loading env..."
   _ <- API.loadEnv
 
   FS.Extra.ensureDirectory API.scratchDir
 
-  log "Parsing CLI args..."
+  Console.log "Parsing CLI args..."
   mode <- liftEffect do
     args <- Array.drop 2 <$> Node.Process.argv
     case Array.uncons args of
@@ -51,7 +52,7 @@ main = Aff.launchAff_ do
         , String.joinWith " " args
         ]
 
-  log "Starting package set publishing..."
+  Console.log "Starting package set publishing..."
 
   githubToken <- liftEffect do
     Node.Process.lookupEnv "GITHUB_TOKEN"
@@ -63,7 +64,7 @@ main = Aff.launchAff_ do
   let
     env :: Env
     env =
-      { comment: \comment -> log ("[COMMENT] " <> comment)
+      { comment: \comment -> Console.log ("[COMMENT] " <> comment)
       , closeIssue: mempty
       , commitMetadataFile: \_ _ -> pure (Right unit)
       , commitIndexFile: \_ _ -> pure (Right unit)
@@ -91,30 +92,30 @@ main = Aff.launchAff_ do
     recentUploads <- findRecentUploads metadata (Hours 24.0)
 
     let candidates = App.PackageSets.validatePackageSetCandidates registryIndex prevPackageSet (map Just recentUploads.accepted)
-    log $ App.PackageSets.printRejections candidates.rejected
+    Console.log $ App.PackageSets.printRejections candidates.rejected
 
     if Map.isEmpty candidates.accepted then do
-      log "No eligible additions, updates, or removals to produce a new package set."
+      Console.log "No eligible additions, updates, or removals to produce a new package set."
     else do
       let
         logPackage name maybeVersion = case maybeVersion of
           -- There are no removals in the automated package sets. This should be
           -- an unreachable case.
           Nothing -> throwWithComment "Package removals are not accepted in automatic package sets."
-          Just version -> log (PackageName.print name <> "@" <> Version.print version)
+          Just version -> Console.log (PackageName.print name <> "@" <> Version.print version)
 
-      log "Found the following package versions eligible for inclusion in package set:"
+      Console.log "Found the following package versions eligible for inclusion in package set:"
       forWithIndex_ candidates.accepted logPackage
       let workDir = Path.concat [ API.scratchDir, "package-set-build" ]
       App.PackageSets.processBatchSequential workDir registryIndex prevPackageSet Nothing candidates.accepted >>= case _ of
         Nothing -> do
-          log "\n----------\nNo packages could be added to the set. All packages failed:"
+          Console.log "\n----------\nNo packages could be added to the set. All packages failed:"
           forWithIndex_ candidates.accepted logPackage
         Just { success, fail, packageSet } -> do
           unless (Map.isEmpty fail) do
-            log "\n----------\nSome packages could not be added to the set:"
+            Console.log "\n----------\nSome packages could not be added to the set:"
             forWithIndex_ fail logPackage
-          log "\n----------\nNew packages were added to the set!"
+          Console.log "\n----------\nNew packages were added to the set!"
           forWithIndex_ success logPackage
           newPath <- App.PackageSets.getPackageSetPath (un PackageSet packageSet).version
           liftAff $ Json.writeJsonFile PackageSet.codec newPath packageSet
