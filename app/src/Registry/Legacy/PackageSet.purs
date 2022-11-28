@@ -261,9 +261,9 @@ mirrorLegacySet :: ConvertedLegacyPackageSet -> RegistryM Unit
 mirrorLegacySet { tag, packageSet, upstream } = do
   tmp <- liftEffect Tmp.mkTmpDir
 
-  { octokit, cache } <- ask
+  { octokit } <- ask
 
-  packageSetsTags <- liftAff (Except.runExceptT (GitHub.listTags octokit cache legacyPackageSetsRepo)) >>= case _ of
+  packageSetsTags <- liftAff (GitHub.request octokit (GitHub.listTags legacyPackageSetsRepo)) >>= case _ of
     Left error -> do
       let formatted = GitHub.printGitHubError error
       RegistryM.throwWithComment $ "Could not fetch tags for the package-sets repo: " <> formatted

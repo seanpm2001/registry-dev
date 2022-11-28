@@ -284,7 +284,12 @@ spagoDhallJsonCodec = Profunctor.dimap toRep fromRep $ Json.object "SpagoDhallJs
 fetchSpagoDhallJson :: GitHub.Address -> RawVersion -> ExceptT GitHub.GitHubError RegistryM SpagoDhallJson
 fetchSpagoDhallJson address (RawVersion ref) = do
   { octokit, cache } <- ask
-  let getFile = Except.mapExceptT liftAff <<< GitHub.getContent octokit cache address ref
+  let
+    getFile path = ExceptT $ liftAff $ GitHub.request octokit (GitHub.getContent address ref path) >>= case _ of
+      Left error -> pure $ Left error
+      Right base64 -> case GitHub.decodeBase64String base64 of
+        Left bad -> pure $ Left $ GitHub.DecodeError bad
+        Right good -> pure $ Right good
   spagoDhall <- getFile "spago.dhall"
   packagesDhall <- getFile "packages.dhall"
   tmp <- liftEffect Tmp.mkTmpDir
@@ -354,7 +359,7 @@ legacyPackageSetEntriesCodec = Internal.Codec.packageMap $ rawVersionMapCodec $ 
 fetchLegacyPackageSets :: RegistryM LegacyPackageSetEntries
 fetchLegacyPackageSets = do
   { octokit, cache } <- ask
-  result <- liftAff $ Except.runExceptT $ GitHub.listTags octokit cache Legacy.PackageSet.legacyPackageSetsRepo
+  result <- liftAff $ GitHub.request octokit (GitHub.listTags Legacy.PackageSet.legacyPackageSetsRepo)
   tags <- case result of
     Left err -> throwWithComment (GitHub.printGitHubError err)
     Right tags -> pure $ Legacy.PackageSet.filterLegacyPackageSets tags

@@ -10,6 +10,7 @@ import Foreign.GitHub (IssueNumber, Octokit)
 import Foreign.GitHub as GitHub
 import Node.FS.Aff as FS.Aff
 import Node.Process as Process
+import Registry.Constants as Constants
 import Registry.Internal.Format as Internal.Format
 import Run (AFF, Run)
 import Run as Run
@@ -77,7 +78,7 @@ handleLogGitHub octokit issue = case _ of
       pure next
   where
   attemptComment message =
-    Except.runExceptT (GitHub.createComment octokit issue message) >>= case _ of
+    GitHub.request octokit (GitHub.createComment Constants.registry issue message) >>= case _ of
       Left err -> do
         Console.error "UNEXPECTED ERROR: Could not send comment to GitHub."
         Console.error $ GitHub.printGitHubError err
