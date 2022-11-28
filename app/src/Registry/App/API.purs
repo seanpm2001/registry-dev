@@ -63,13 +63,13 @@ import Registry.App.Auth as Auth
 import Registry.App.Cache (Cache)
 import Registry.App.Cache as Cache
 import Registry.App.Json as Json
-import Registry.App.LenientVersion as LenientVersion
 import Registry.App.PackageIndex as PackageIndex
 import Registry.App.PackageSets as App.PackageSets
 import Registry.App.PackageStorage as PackageStorage
 import Registry.App.RegistryM (Env, RegistryM, closeIssue, comment, commitMetadataFile, commitPackageSetFile, deletePackage, readPackagesMetadata, runRegistryM, throwWithComment, updatePackagesMetadata, uploadPackage)
 import Registry.Constants (GitHubRepo)
 import Registry.Constants as Constants
+import Registry.Legacy.LenientVersion as LenientVersion
 import Registry.Legacy.Manifest as Legacy.Manifest
 import Registry.Legacy.PackageSet as Legacy.PackageSet
 import Registry.Location as Location

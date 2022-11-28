@@ -1,8 +1,6 @@
 module Registry.Legacy.PackageSet
   ( ConvertedLegacyPackageSet
   , LatestCompatibleSets
-  , LegacyPackageSet(..)
-  , LegacyPackageSetEntry
   , PscTag(..)
   , filterLegacyPackageSets
   , fromPackageSet
@@ -11,8 +9,6 @@ module Registry.Legacy.PackageSet
   , parsePscTag
   , printDhall
   , printPscTag
-  , legacyPackageSetCodec
-  , legacyPackageSetEntryCodec
   , pscTagCodec
   , latestCompatibleSetsCodec
   ) where
@@ -21,7 +17,6 @@ import Registry.App.Prelude
 
 import Control.Monad.Error.Class as Error
 import Control.Monad.Except as Except
-import Control.Monad.Reader (ask)
 import Data.Array as Array
 import Data.Codec.Argonaut (JsonCodec)
 import Data.Codec.Argonaut as CA
@@ -35,7 +30,6 @@ import Data.Formatter.DateTime as Formatter.DateTime
 import Data.FunctorWithIndex (mapWithIndex)
 import Data.List (List(..), (:))
 import Data.Map as Map
-import Data.Profunctor as Profunctor
 import Data.Set as Set
 import Data.String as String
 import Data.String.CodeUnits as String.CodeUnits
@@ -50,42 +44,21 @@ import Parsing as Parsing
 import Parsing.Combinators.Array as Parsing.Combinators.Array
 import Parsing.String as Parsing.String
 import Registry.App.Json as Json
-import Registry.App.RegistryM (RegistryM)
-import Registry.App.RegistryM as RegistryM
+import Registry.App.Types (LegacyPackageSet(..), LegacyPackageSetEntry, legacyPackageSetCodec)
+import Registry.Effect.GitHub (GITHUB)
+import Registry.Effect.GitHub as Effect.GitHub
+import Registry.Effect.Log (LOG)
+import Registry.Effect.Log as Log
 import Registry.Internal.Codec as Internal.Codec
 import Registry.Internal.Format as Internal.Format
 import Registry.ManifestIndex as ManifestIndex
 import Registry.PackageName as PackageName
 import Registry.Version as Version
+import Run (AFF, Run)
+import Run as Run
 
 legacyPackageSetsRepo :: GitHub.Address
 legacyPackageSetsRepo = { owner: "purescript", repo: "package-sets" }
-
--- | The format of a legacy packages.json package set file
-newtype LegacyPackageSet = LegacyPackageSet (Map PackageName LegacyPackageSetEntry)
-
-derive instance Newtype LegacyPackageSet _
-derive newtype instance Eq LegacyPackageSet
-
-legacyPackageSetCodec :: JsonCodec LegacyPackageSet
-legacyPackageSetCodec =
-  Profunctor.wrapIso LegacyPackageSet
-    $ Internal.Codec.packageMap legacyPackageSetEntryCodec
-
--- | The format of a legacy packages.json package set entry for an individual
--- | package.
-type LegacyPackageSetEntry =
-  { dependencies :: Array PackageName
-  , repo :: String
-  , version :: RawVersion
-  }
-
-legacyPackageSetEntryCodec :: JsonCodec LegacyPackageSetEntry
-legacyPackageSetEntryCodec = Json.object "LegacyPackageSetEntry"
-  { dependencies: CA.array PackageName.codec
-  , repo: CA.string
-  , version: Profunctor.wrapIso RawVersion CA.string
-  }
 
 type ConvertedLegacyPackageSet =
   { tag :: PscTag
@@ -255,28 +228,29 @@ type LatestCompatibleSets = Map Version PscTag
 latestCompatibleSetsCodec :: JsonCodec LatestCompatibleSets
 latestCompatibleSetsCodec = Internal.Codec.versionMap pscTagCodec
 
+-- TODO: Avoid using AFF
+--
 -- https://github.com/purescript/package-sets/blob/psc-0.15.4-20220829/release.sh
 -- https://github.com/purescript/package-sets/blob/psc-0.15.4-20220829/update-latest-compatible-sets.sh
-mirrorLegacySet :: ConvertedLegacyPackageSet -> RegistryM Unit
+mirrorLegacySet :: forall r. ConvertedLegacyPackageSet -> Run (GITHUB + LOG + AFF + r) Unit
 mirrorLegacySet { tag, packageSet, upstream } = do
-  tmp <- liftEffect Tmp.mkTmpDir
+  tmp <- Run.liftAff $ liftEffect Tmp.mkTmpDir
 
-  { octokit } <- ask
-
-  packageSetsTags <- liftAff (GitHub.request octokit (GitHub.listTags legacyPackageSetsRepo)) >>= case _ of
+  packageSetsTags <- Effect.GitHub.listTags legacyPackageSetsRepo >>= case _ of
     Left error -> do
       let formatted = GitHub.printGitHubError error
-      RegistryM.throwWithComment $ "Could not fetch tags for the package-sets repo: " <> formatted
-    Right tags -> pure $ Set.fromFoldable $ map _.name tags
+      Log.die $ "Could not fetch tags for the package-sets repo: " <> formatted
+    Right tags ->
+      pure $ Set.fromFoldable $ map _.name tags
 
   let printedTag = printPscTag tag
 
   when (Set.member printedTag packageSetsTags) do
-    RegistryM.throwWithComment $ "Package set tag " <> printedTag <> " already exists, aborting..."
+    Log.die $ "Package set tag " <> printedTag <> " already exists, aborting..."
 
   let packageSetsUrl = "https://github.com/" <> legacyPackageSetsRepo.owner <> "/" <> legacyPackageSetsRepo.repo <> ".git"
-  liftAff (Except.runExceptT (Git.runGit [ "clone", packageSetsUrl, "--depth", "1" ] (Just tmp))) >>= case _ of
-    Left error -> RegistryM.throwWithComment error
+  Run.liftAff (Except.runExceptT (Git.runGit [ "clone", packageSetsUrl, "--depth", "1" ] (Just tmp))) >>= case _ of
+    Left error -> Log.die error
     Right _ -> pure unit
 
   -- We need to write three files to the package sets repository:
@@ -293,13 +267,13 @@ mirrorLegacySet { tag, packageSet, upstream } = do
   let packageSetsPath = Path.concat [ tmp, legacyPackageSetsRepo.repo ]
   let latestSetsPath = Path.concat [ packageSetsPath, "latest-compatible-sets.json" ]
   latestCompatibleSets <- do
-    latestSets <- liftAff (Json.readJsonFile latestCompatibleSetsCodec latestSetsPath) >>= case _ of
-      Left err -> RegistryM.throwWithComment $ "Failed to read latest-compatible-sets: " <> err
+    latestSets <- Run.liftAff (Json.readJsonFile latestCompatibleSetsCodec latestSetsPath) >>= case _ of
+      Left err -> Log.die $ "Failed to read latest-compatible-sets.json: " <> err
       Right parsed -> pure parsed
     let key = (un PscTag tag).compiler
     case Map.lookup key latestSets of
       Just existingTag | existingTag >= tag -> do
-        RegistryM.comment "Not updating latest-compatible sets because this tag (or a higher one) already exists."
+        Log.info "Not updating latest-compatible sets because this tag (or a higher one) already exists."
         pure latestSets
       _ ->
         pure $ Map.insert key tag latestSets
@@ -322,7 +296,7 @@ mirrorLegacySet { tag, packageSet, upstream } = do
       , Just printedTag
       ]
 
-  result <- liftAff $ Except.runExceptT do
+  result <- Run.liftAff $ Except.runExceptT do
     GitHub.GitHubToken token <- Git.configurePacchettiBotti (Just packageSetsPath)
     for_ commitFiles \(Tuple path contents) -> do
       liftAff $ FS.Aff.writeTextFile UTF8 path (contents <> "\n")
@@ -336,7 +310,7 @@ mirrorLegacySet { tag, packageSet, upstream } = do
       Git.runGit_ [ "push", origin, pushTag ] (Just packageSetsPath)
 
   case result of
-    Left error -> RegistryM.throwWithComment $ "Package set mirroring failed: " <> error
+    Left error -> Log.die $ "Package set mirroring failed: " <> error
     Right _ -> pure unit
 
 filterLegacyPackageSets :: Array GitHub.Tag -> Array String

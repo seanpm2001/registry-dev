@@ -12,6 +12,7 @@ module Registry.Effect.GitHub
   , commitPackageSet
   , getCommitDate
   , getContent
+  , getJsonFile
   , getRefCommit
   , handleGitHubAff
   , handleRegistryRepoGitHub
@@ -31,8 +32,10 @@ import Data.Time.Duration as Duration
 import Foreign.Git as Git
 import Foreign.GitHub (Address, GitHubError(..), GitHubToken(..), IssueNumber, Octokit, Request, Tag, Team)
 import Foreign.GitHub as GitHub
+import Foreign.JsonRepair as JsonRepair
 import Foreign.Object as Object
 import Node.Path as Path
+import Registry.App.Json (JsonCodec)
 import Registry.App.Json as Json
 import Registry.App.RegistryCache (RegistryCache(..))
 import Registry.App.RegistryCache as App.RegistryCache
@@ -74,6 +77,17 @@ listTeamMembers team = Run.lift _github (ListTeamMembers team identity)
 
 getContent :: forall r. Address -> String -> FilePath -> Run (GITHUB + r) (Either GitHubError String)
 getContent address ref path = Run.lift _github (GetContent address ref path identity)
+
+getJsonFile :: forall r a. Address -> String -> JsonCodec a -> FilePath -> Run (GITHUB + r) (Either GitHubError a)
+getJsonFile address ref codec path = do
+  content <- getContent address ref path
+  let
+    attemptDecode inner = case Json.jsonParser (JsonRepair.tryRepair inner) of
+      Left jsonError -> Left $ GitHub.DecodeError $ "Not Json: " <> jsonError
+      Right json -> case Json.decode codec json of
+        Left decodeError -> Left $ GitHub.DecodeError $ Json.printJsonDecodeError decodeError
+        Right decoded -> Right decoded
+  pure $ attemptDecode =<< content
 
 getRefCommit :: forall r. Address -> String -> Run (GITHUB + r) (Either GitHubError String)
 getRefCommit address ref = Run.lift _github (GetRefCommit address ref identity)

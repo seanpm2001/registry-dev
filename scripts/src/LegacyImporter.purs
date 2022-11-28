@@ -43,11 +43,11 @@ import Registry.App.API as API
 import Registry.App.Cache as Cache
 import Registry.App.Json (JsonCodec)
 import Registry.App.Json as Json
-import Registry.App.LenientVersion (LenientVersion)
-import Registry.App.LenientVersion as LenientVersion
 import Registry.App.PackageIndex as PackageIndex
 import Registry.App.PackageStorage as PackageStorage
 import Registry.App.RegistryM (RegistryM, commitMetadataFile, readPackagesMetadata, runRegistryM, throwWithComment)
+import Registry.Legacy.LenientVersion (LenientVersion)
+import Registry.Legacy.LenientVersion as LenientVersion
 import Registry.Legacy.Manifest (LegacyManifestError(..), LegacyManifestValidationError, LegacyPackageSetEntries)
 import Registry.Legacy.Manifest as Legacy.Manifest
 import Registry.Location as Location

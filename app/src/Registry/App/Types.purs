@@ -5,11 +5,14 @@ import Prelude
 
 import Data.Codec.Argonaut (JsonCodec)
 import Data.Codec.Argonaut as CA
+import Data.Codec.Argonaut.Record as CA.Record
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype, un)
 import Data.Profunctor as Profunctor
 import Registry.Internal.Codec as Internal.Codec
+import Registry.PackageName (PackageName)
+import Registry.PackageName as PackageName
 
 -- | An unprocessed package name, which may possibly be malformed.
 newtype RawPackageName = RawPackageName String
@@ -46,3 +49,36 @@ derive newtype instance Ord RawVersionRange
 
 rawVersionRangeCodec :: JsonCodec RawVersionRange
 rawVersionRangeCodec = Profunctor.wrapIso RawVersionRange CA.string
+
+-- | The format of a legacy packages.json package set file
+newtype LegacyPackageSet = LegacyPackageSet (Map PackageName LegacyPackageSetEntry)
+
+derive instance Newtype LegacyPackageSet _
+derive newtype instance Eq LegacyPackageSet
+
+legacyPackageSetCodec :: JsonCodec LegacyPackageSet
+legacyPackageSetCodec =
+  Profunctor.wrapIso LegacyPackageSet
+    $ Internal.Codec.packageMap legacyPackageSetEntryCodec
+
+-- | The format of a legacy packages.json package set entry for an individual
+-- | package.
+type LegacyPackageSetEntry =
+  { dependencies :: Array PackageName
+  , repo :: String
+  , version :: RawVersion
+  }
+
+legacyPackageSetEntryCodec :: JsonCodec LegacyPackageSetEntry
+legacyPackageSetEntryCodec = CA.Record.object "LegacyPackageSetEntry"
+  { dependencies: CA.array PackageName.codec
+  , repo: CA.string
+  , version: Profunctor.wrapIso RawVersion CA.string
+  }
+
+-- | The union of all legacy package sets, with packages represented at all
+-- | versions they have in the package sets.
+type LegacyPackageSetUnion = Map PackageName (Map RawVersion (Map PackageName RawVersion))
+
+legacyPackageSetUnionCodec :: JsonCodec LegacyPackageSetUnion
+legacyPackageSetUnionCodec = Internal.Codec.packageMap $ rawVersionMapCodec $ Internal.Codec.packageMap rawVersionCodec

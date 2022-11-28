@@ -1,4 +1,4 @@
--- TODO: Rename to 'Cache'
+-- TODO: Rename to 'Cache'.
 module Registry.App.RegistryCache where
 
 import Registry.App.Prelude
@@ -7,11 +7,14 @@ import Data.Argonaut.Core (Json)
 import Data.Codec.Argonaut as CA
 import Data.Codec.Argonaut.Common as CA.Common
 import Data.Exists as Exists
+import Foreign.GitHub (GitHubError)
 import Foreign.GitHub as GitHub
-import Registry.Effect.Cache (class Functor2, CACHE, CacheKey, JsonEncodedBox(..), JsonKeyHandler, CacheEntry)
+import Registry.App.Types as Types
+import Registry.Effect.Cache (class Functor2, CACHE, CacheEntry, CacheKey, JsonEncodedBox(..), JsonKeyHandler)
 import Registry.Effect.Cache as Cache
 import Registry.Manifest as Manifest
 import Registry.PackageName as PackageName
+import Registry.Sha256 as Sha256
 import Registry.Version as Version
 import Run (Run)
 import Run as Run
@@ -20,7 +23,9 @@ import Run as Run
 -- | use the 'get', 'put', and 'delete' functions from this module.
 data RegistryCache (c :: Type -> Type -> Type) a
   = ManifestFile PackageName Version (c Manifest.Manifest a)
-  | GitHubRequest GitHub.Route (c (Either GitHub.GitHubError Json) a)
+  | GitHubRequest GitHub.Route (c (Either GitHubError Json) a)
+  | LegacyPackageSet String (c (Either GitHubError Types.LegacyPackageSet) a)
+  | LegacyPackageSetUnion Sha256 (c Types.LegacyPackageSetUnion a)
 
 -- Ideally, with quantified constraints, this could be written as:
 --   (forall x. Functor (c x)) => Functor (RegistryCache c)
@@ -30,6 +35,8 @@ instance Functor2 c => Functor (RegistryCache c) where
   map k = case _ of
     ManifestFile name version a -> ManifestFile name version (Cache.map2 k a)
     GitHubRequest route a -> GitHubRequest route (Cache.map2 k a)
+    LegacyPackageSet ref a -> LegacyPackageSet ref (Cache.map2 k a)
+    LegacyPackageSetUnion tagsHash a -> LegacyPackageSetUnion tagsHash (Cache.map2 k a)
 
 -- | A handler for the RegistryCache key for JSON caches. Can be used to
 -- | implement interpreters for the CACHE effect:
@@ -51,6 +58,14 @@ keyHandler = case _ of
   GitHubRequest route next -> Exists.mkExists $ flip JsonKey next
     { id: "GitHubRequest__" <> GitHub.printRoute route
     , codec: CA.Common.either GitHub.githubErrorCodec CA.json
+    }
+  LegacyPackageSet ref next -> Exists.mkExists $ flip JsonKey next
+    { id: "LegacyPackageSet__" <> ref
+    , codec: CA.Common.either GitHub.githubErrorCodec Types.legacyPackageSetCodec
+    }
+  LegacyPackageSetUnion tagsHash next -> Exists.mkExists $ flip JsonKey next
+    { id: "LegacyPackageSetUnion__" <> Sha256.print tagsHash
+    , codec: Types.legacyPackageSetUnionCodec
     }
 
 -- | Get an item from the registry cache.
