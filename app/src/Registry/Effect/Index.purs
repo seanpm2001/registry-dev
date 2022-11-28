@@ -126,7 +126,7 @@ handleIndex { registryPath, registryIndexPath } = case _ of
             dependencies = do
               Tuple depName depRange <- Map.toUnfoldable dependency
               [ PackageName.print depName <> "(" <> Range.print depRange <> ")" ]
-          pure $ Array.fold [ PackageName.print name, "@", Version.print version, " cannot satisfy: ", String.joinWith ", " dependencies ]
+          pure $ Array.fold [ formatPackageVersion name version, " cannot satisfy: ", String.joinWith ", " dependencies ]
 
         Right index ->
           pure $ reply index
