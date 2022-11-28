@@ -2,9 +2,9 @@ module Registry.Effect.Storage
   ( Storage
   , STORAGE
   , _storage
-  , upload
-  , download
-  , delete
+  , uploadTarball
+  , downloadTarball
+  , deleteTarball
   , handleStorageS3
   ) where
 
@@ -15,8 +15,10 @@ import Affjax.ResponseFormat as ResponseFormat
 import Affjax.StatusCode (StatusCode(..))
 import Data.Array as Array
 import Data.HTTP.Method (Method(..))
+import Effect.Aff as Aff
 import Foreign.S3 as S3
 import Node.Buffer as Buffer
+import Node.FS.Aff as FS.Aff
 import Registry.Constants as Constants
 import Registry.Effect.Log (LOG)
 import Registry.Effect.Log as Log
@@ -27,8 +29,8 @@ import Run as Run
 import Type.Proxy (Proxy(..))
 
 data Storage a
-  = Upload PackageName Version Buffer a
-  | Download PackageName Version (Buffer -> a)
+  = Upload PackageName Version FilePath a
+  | Download PackageName Version FilePath a
   | Delete PackageName Version a
 
 derive instance Functor Storage
@@ -39,16 +41,16 @@ _storage :: Proxy "storage"
 _storage = Proxy
 
 -- | Upload a package to the storage backend.
-upload :: forall r. PackageName -> Version -> Buffer -> Run (STORAGE + r) Unit
-upload name version buffer = Run.lift _storage (Upload name version buffer unit)
+uploadTarball :: forall r. PackageName -> Version -> FilePath -> Run (STORAGE + r) Unit
+uploadTarball name version file = Run.lift _storage (Upload name version file unit)
 
 -- | Download a package from the storage backend.
-download :: forall r. PackageName -> Version -> Run (STORAGE + r) Buffer
-download name version = Run.lift _storage (Download name version identity)
+downloadTarball :: forall r. PackageName -> Version -> FilePath -> Run (STORAGE + r) Unit
+downloadTarball name version file = Run.lift _storage (Download name version file unit)
 
 -- | Delete a package from the storage backend.
-delete :: forall r. PackageName -> Version -> Run (STORAGE + r) Unit
-delete name version = Run.lift _storage (Delete name version unit)
+deleteTarball :: forall r. PackageName -> Version -> Run (STORAGE + r) Unit
+deleteTarball name version = Run.lift _storage (Delete name version unit)
 
 connectS3 :: forall r. Run (LOG + AFF + r) S3.Space
 connectS3 = do
@@ -71,7 +73,11 @@ formatPackageUrl name version = Array.fold
 -- | Handle package storage using a remote S3 bucket.
 handleStorageS3 :: forall r a. Storage a -> Run (LOG + AFF + r) a
 handleStorageS3 = case _ of
-  Upload name version buffer next -> do
+  Upload name version path next -> do
+    buffer <- Run.liftAff (Aff.attempt (FS.Aff.readFile path)) >>= case _ of
+      Left error -> Log.die $ "Could not read file at path " <> path <> ": " <> Aff.message error
+      Right buf -> pure buf
+
     let
       package = formatPackageVersion name version
       packageUrl = formatPackageUrl name version
@@ -94,7 +100,7 @@ handleStorageS3 = case _ of
           Log.debug $ "Uploaded " <> package <> " to the bucket at path " <> packageUrl
           pure next
 
-  Download name version reply -> do
+  Download name version path next -> do
     let
       package = formatPackageVersion name version
       packageUrl = formatPackageUrl name version
@@ -127,7 +133,10 @@ handleStorageS3 = case _ of
       Just (Right { body }) -> do
         Log.debug $ "Successfully downloaded " <> package <> " into a buffer."
         buffer <- Run.liftAff $ liftEffect $ Buffer.fromArrayBuffer body
-        pure (reply buffer)
+        Run.liftAff (Aff.attempt (FS.Aff.writeFile path buffer)) >>= case _ of
+          Left error -> Log.die $ "Failed to write tarball buffer to file at path " <> path <> ": " <> Aff.message error
+          Right _ -> pure unit
+        pure next
 
   Delete name version next -> do
     let

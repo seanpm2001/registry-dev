@@ -15,18 +15,18 @@ module Foreign.GitHub
   , Tag
   , Team
   , TeamMember
-  , closeIssue
-  , createComment
+  , closeIssueRequest
+  , createCommentRequest
   , decodeBase64String
   , decodeEvent
   , formatRFC1123
-  , getCommitDate
-  , getContent
-  , getRateLimit
-  , getRefCommit
+  , getCommitDateRequest
+  , getContentRequest
+  , getRateLimitRequest
+  , getRefCommitRequest
   , githubErrorCodec
-  , listTags
-  , listTeamMembers
+  , listTagsRequest
+  , listTeamMembersRequest
   , mkOctokit
   , parseRepo
   , printGitHubError
@@ -108,8 +108,8 @@ type TeamMember = { login :: String, id :: Int }
 
 -- | List members of the given team
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/teams/listMembersInOrg.md
-listTeamMembers :: Team -> Request (Array TeamMember)
-listTeamMembers team =
+listTeamMembersRequest :: Team -> Request (Array TeamMember)
+listTeamMembersRequest team =
   { route: Route GET [ "orgs", team.org, "teams", team.team, "members" ] Map.empty
   , headers: Object.empty
   , args: noArgs
@@ -122,8 +122,8 @@ listTeamMembers team =
 
 -- | List repository tags
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/repos/listTags.md
-listTags :: Address -> Request (Array Tag)
-listTags address =
+listTagsRequest :: Address -> Request (Array Tag)
+listTagsRequest address =
   { route: Route GET [ "repos", address.owner, address.repo, "tags" ] Map.empty
   , headers: Object.empty
   , args: noArgs
@@ -145,8 +145,8 @@ decodeBase64String (Base64String string) =
 -- | Fetch a specific file  from the provided repository at the given ref and
 -- | filepath. Filepaths should lead to a single file from the root of the repo.
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/repos/getContent.md
-getContent :: Address -> String -> FilePath -> Request Base64String
-getContent address ref path =
+getContentRequest :: Address -> String -> FilePath -> Request Base64String
+getContentRequest address ref path =
   { route: Route GET [ "repos", address.owner, address.repo, "contents", path ] (Map.singleton "ref" ref)
   , headers: Object.empty
   , args: noArgs
@@ -173,8 +173,8 @@ getContent address ref path =
 
 -- | Fetch the commit SHA for a given ref on a GitHub repository
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/git/getRef.md
-getRefCommit :: Address -> String -> Request String
-getRefCommit address ref = do
+getRefCommitRequest :: Address -> String -> Request String
+getRefCommitRequest address ref = do
   { route: Route GET [ "repos", address.owner, address.repo, "git", "ref", ref ] Map.empty
   , headers: Object.empty
   , args: noArgs
@@ -194,8 +194,8 @@ getRefCommit address ref = do
 
 -- | Fetch the date associated with a given commit, in the RFC3339String format.
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/git/getCommit.md
-getCommitDate :: Address -> String -> Request DateTime
-getCommitDate address commitSha = do
+getCommitDateRequest :: Address -> String -> Request DateTime
+getCommitDateRequest address commitSha = do
   { route: Route GET [ "repos", address.owner, address.repo, "git", "commits", commitSha ] Map.empty
   , headers: Object.empty
   , args: noArgs
@@ -215,8 +215,8 @@ getCommitDate address commitSha = do
 
 -- | Create a comment on an issue. Requires authentication.
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/issues/createComment.md
-createComment :: Address -> IssueNumber -> String -> Request Unit
-createComment address (IssueNumber issue) body = do
+createCommentRequest :: Address -> IssueNumber -> String -> Request Unit
+createCommentRequest address (IssueNumber issue) body = do
   { route: Route POST [ "repos", address.owner, address.repo, "issues", show issue, "comments" ] Map.empty
   , headers: Object.empty
   , args: toJSArgs { body }
@@ -226,8 +226,8 @@ createComment address (IssueNumber issue) body = do
 
 -- | Close an issue. Requires authentication.
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/issues/update.md
-closeIssue :: Address -> IssueNumber -> Request Unit
-closeIssue address (IssueNumber issue) =
+closeIssueRequest :: Address -> IssueNumber -> Request Unit
+closeIssueRequest address (IssueNumber issue) =
   { route: Route PATCH [ "repos", address.owner, address.repo, "issues", show issue ] Map.empty
   , headers: Object.empty
   , args: toJSArgs { state: "closed" }
@@ -242,8 +242,8 @@ type RateLimit =
   }
 
 -- | Get the current status of the rate limit imposed by GitHub on their API
-getRateLimit :: Request RateLimit
-getRateLimit = do
+getRateLimitRequest :: Request RateLimit
+getRateLimitRequest = do
   { route: Route GET [ "rate_limit" ] Map.empty
   , headers: Object.empty
   , args: noArgs

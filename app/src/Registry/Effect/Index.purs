@@ -1,5 +1,6 @@
 module Registry.Effect.Index where
 
+import Prelude
 import Registry.App.Prelude
 
 import Data.Array as Array
@@ -76,18 +77,21 @@ handleIndex :: forall r a. IndexEnv -> Index a -> Run (REGISTRY_REPO + CACHE + L
 handleIndex { registryPath, registryIndexPath } = case _ of
   ReadMetadataIndex reply -> do
     let metadataDir = Path.concat [ registryPath, Constants.packageMetadataDirectory ]
-    paths <- Run.liftAff $ FastGlob.match' metadataDir [ "*.json" ] { include: FastGlob.FilesOnly }
-    let packages = partitionEithers $ map (PackageName.parse <<< Path.basename) paths.succeeded
-    Log.warn $ "Some entries in the metadata directory are not valid package names:" <> Array.foldMap (append "\n  - ") packages.fail
+
+    files <- Run.liftAff $ FS.Aff.readdir metadataDir
+    let stripSuffix = note "No .json suffix" <<< String.stripSuffix (String.Pattern ".json")
+    let packages = partitionEithers $ map (PackageName.parse <=< stripSuffix) files
+    unless (Array.null packages.fail) do
+      Log.die $ "Some entries in the metadata directory are not valid package names:" <> Array.foldMap (append "\n  - ") packages.fail
+
     entries <- Run.liftAff $ map partitionEithers $ for packages.success \name -> do
       result <- Json.readJsonFile Metadata.codec (Path.concat [ registryPath, Metadata.packageMetadataPath name ])
       pure $ map (Tuple name) result
-    case entries.fail of
-      [] -> do
-        Log.debug "Successfully read metadata entries."
-        pure $ reply $ Map.fromFoldable entries.success
-      failed ->
-        Log.die $ append "Invalid metadata directory (some package metadata cannot be decoded):" $ Array.foldMap (append "\n  - ") failed
+    unless (Array.null entries.fail) do
+      Log.die $ append "Invalid metadata directory (some package metadata cannot be decoded):" $ Array.foldMap (append "\n  - ") entries.fail
+
+    Log.debug "Successfully read metadata entries."
+    pure $ reply $ Map.fromFoldable entries.success
 
   ReadMetadata name reply -> do
     Log.debug $ "Reading metadata for " <> PackageName.print name

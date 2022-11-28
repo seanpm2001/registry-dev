@@ -100,17 +100,17 @@ handleGitHubAff :: forall r a. Octokit -> GitHub a -> Run (CACHE + LOG + AFF + r
 handleGitHubAff octokit = case _ of
   ListTags address reply -> do
     Log.debug $ "Listing tags for " <> show address
-    result <- request octokit (GitHub.listTags address)
+    result <- request octokit (GitHub.listTagsRequest address)
     pure $ reply result
 
   ListTeamMembers team reply -> do
     Log.debug $ "Listing members of team " <> show team
-    result <- request octokit (GitHub.listTeamMembers team)
+    result <- request octokit (GitHub.listTeamMembersRequest team)
     pure $ reply $ map (map _.login) result
 
   GetContent address ref path reply -> do
     Log.debug $ "Fetching content from " <> show address <> " at ref " <> ref <> " at path " <> path
-    request octokit (GitHub.getContent address ref path) >>= case _ of
+    request octokit (GitHub.getContentRequest address ref path) >>= case _ of
       Left error -> pure $ reply $ Left error
       Right result -> case GitHub.decodeBase64String result of
         Left base64Error -> do
@@ -121,12 +121,12 @@ handleGitHubAff octokit = case _ of
 
   GetRefCommit address ref reply -> do
     Log.debug $ "Fetching commit associated with ref " <> ref <> " on repository " <> show address
-    result <- request octokit (GitHub.getRefCommit address ref)
+    result <- request octokit (GitHub.getRefCommitRequest address ref)
     pure $ reply result
 
   GetCommitDate address ref reply -> do
     Log.debug $ "Fetching commit date associated with ref " <> ref <> " on repository " <> show address
-    result <- request octokit (GitHub.getCommitDate address ref)
+    result <- request octokit (GitHub.getCommitDateRequest address ref)
     pure $ reply result
 
 data RegistryRepo a
@@ -196,7 +196,7 @@ type RegistryGitHubEnv =
 handleRegistryRepoGitHub :: forall r a. RegistryGitHubEnv -> RegistryRepo a -> Run (CACHE + AFF + LOG + r) a
 handleRegistryRepoGitHub { octokit, issue, pacchettibotti, registryPath, registryIndexPath } = case _ of
   CloseIssue next -> do
-    request octokit (GitHub.closeIssue Constants.registry issue) >>= case _ of
+    request octokit (GitHub.closeIssueRequest Constants.registry issue) >>= case _ of
       Left githubError -> do
         Log.error $ "Could not close GitHub issue: " <> GitHub.printGitHubError githubError
         pure next
@@ -273,7 +273,7 @@ requestWithBackoff octokit githubRequest = do
   result <- Run.liftAff $ withBackoff
     { delay: Duration.Milliseconds 5_000.0
     , action
-    , shouldCancel: \_ -> GitHub.request octokit GitHub.getRateLimit >>= case _ of
+    , shouldCancel: \_ -> GitHub.request octokit GitHub.getRateLimitRequest >>= case _ of
         Right { remaining } | remaining == 0 -> pure false
         _ -> pure true
     , shouldRetry: \attempt -> if attempt <= 3 then pure (Just action) else pure Nothing
@@ -289,7 +289,7 @@ request :: forall r a. GitHub.Octokit -> GitHub.Request a -> Run (CACHE + LOG + 
 request octokit githubRequest@{ route, codec } = do
   -- We cache GET requests, other than requests to fetch the current rate limit.
   case GitHub.routeMethod route of
-    GET | route /= GitHub.getRateLimit.route -> do
+    GET | route /= GitHub.getRateLimitRequest.route -> do
       entry <- Cache.get (Cache.GitHubRequest route)
       now <- Run.liftAff $ liftEffect nowUTC
       case entry of
