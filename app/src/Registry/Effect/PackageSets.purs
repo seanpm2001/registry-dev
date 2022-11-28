@@ -30,6 +30,7 @@ data PackageSets a
 
 derive instance Functor PackageSets
 
+-- | An effect for interacting with package sets
 type PACKAGE_SETS r = (packageSets :: PackageSets | r)
 
 _packageSets :: Proxy "packageSets"

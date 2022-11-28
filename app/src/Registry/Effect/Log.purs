@@ -25,6 +25,7 @@ data Log a = Log LogLevel String a
 
 derive instance Functor Log
 
+-- | An effect for reporting events as messages
 type LOG r = (log :: Log | r)
 
 _log :: Proxy "log"

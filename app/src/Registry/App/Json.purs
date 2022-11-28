@@ -57,9 +57,9 @@ readJsonFile codec path = do
 
 -- | Decode the value of a field from an Object Json using the given codec.
 -- | Useful for ad-hoc decoders.
-atKey :: forall a. String -> Codec.Argonaut.JsonCodec a -> Object Core.Json -> Either String a
+atKey :: forall a. String -> Codec.Argonaut.JsonCodec a -> Object Core.Json -> Either Codec.Argonaut.JsonDecodeError a
 atKey key codec object =
   Maybe.maybe
-    (Left $ Codec.Argonaut.printJsonDecodeError $ Codec.Argonaut.AtKey key Codec.Argonaut.MissingValue)
-    (lmap (Codec.Argonaut.printJsonDecodeError <<< Codec.Argonaut.AtKey key) <<< Codec.Argonaut.decode codec)
+    (Left $ Codec.Argonaut.AtKey key Codec.Argonaut.MissingValue)
+    (lmap (Codec.Argonaut.AtKey key) <<< Codec.Argonaut.decode codec)
     (Object.lookup key object)

@@ -5,7 +5,7 @@ import Registry.App.Prelude
 import Control.Monad.Except as Except
 import Data.DateTime (DateTime)
 import Foreign.Git as Git
-import Foreign.GitHub (Address, GitHubToken(..), IssueNumber(..), Octokit, Tag, Team)
+import Foreign.GitHub (Address, GitHubToken(..), IssueNumber(..), Octokit, RateLimit, Tag, Team)
 import Foreign.GitHub as GitHub
 import Node.Path as Path
 import Registry.Constants as Constants
@@ -26,6 +26,7 @@ data GitHub a
   | GetContent Address String FilePath (String -> a)
   | GetRefCommit Address String (String -> a)
   | GetCommitDate Address String (DateTime -> a)
+  | GetRateLimit (RateLimit -> a)
 
 derive instance Functor GitHub
 
@@ -117,13 +118,16 @@ type RegistryGitHubEnv =
 handleRegistryRepoGitHub :: forall r a. RegistryGitHubEnv -> RegistryRepo a -> Run (AFF + LOG + r) a
 handleRegistryRepoGitHub { octokit, issue, pacchettibotti, registryPath, registryIndexPath } = case _ of
   CloseIssue next -> do
-    Run.liftAff (Except.runExceptT (GitHub.closeIssue octokit issue)) >>= case _ of
-      Left githubError -> do
-        Log.error $ "Could not close GitHub issue: " <> GitHub.printGitHubError githubError
-        pure next
-      Right _ -> do
-        Log.debug $ "Closed GitHub issue #" <> show (un IssueNumber issue)
-        pure next
+    pure next
+  {-
+  Run.liftAff (Except.runExceptT (GitHub.closeIssue Constants.registry octokit issue)) >>= case _ of
+    Left githubError -> do
+      Log.error $ "Could not close GitHub issue: " <> GitHub.printGitHubError githubError
+      pure next
+    Right _ -> do
+      Log.debug $ "Closed GitHub issue #" <> show (un IssueNumber issue)
+      pure next
+  -}
 
   CommitMetadata name next -> do
     let nameString = PackageName.print name
@@ -184,3 +188,108 @@ handleRegistryRepoGitHub { octokit, issue, pacchettibotti, registryPath, registr
     runGit_ [ "pull", "--rebase", "--autostash" ]
     runGit_ [ "add", path ]
     runGit_ [ "commit", "-m", message ]
+
+-- -- | Apply exponential backoff to requests that hang, but without cancelling
+-- -- | requests if we have reached our rate limit and have been throttled.
+-- rateLimitBackoff :: forall a. Octokit -> Aff (Either GitHubError a) -> Aff (Either GitHubError a)
+-- rateLimitBackoff octokit action = do
+--   maybeResult <- withBackoff
+--     { delay: Aff.Milliseconds 5_000.0
+--     , action
+--     , shouldCancel: \_ -> request octokit getRateLimit >>= case _ of
+--         Right { remaining } | remaining == 0 -> pure false
+--         _ -> pure true
+--     , shouldRetry: \attempt -> if attempt <= 3 then pure (Just action) else pure Nothing
+--     }
+--   pure $ case maybeResult of
+--     Nothing -> Left $ APIError { statusCode: 400, message: "Unable to reach GitHub servers." }
+--     Just result -> Right result
+
+-- -- TODO: Migrate into the GITHUB module.
+-- --
+-- -- | A helper function for implementing GET requests to the GitHub API that
+-- -- | relies on the GitHub API to report whether there is any new data, and falls
+-- -- | back to the cache if there is not. Should only be used on GET requests; for
+-- -- | POST requests, use `request`.
+-- cachedRequest
+--   :: forall args
+--    . (UncachedRequestArgs args -> ExceptT GitHubAPIError Aff Json)
+--   -> UncachedRequestArgs args
+--   -> { cache :: Cache, checkGitHub :: Boolean }
+--   -> ExceptT GitHubAPIError Aff Json
+-- cachedRequest runRequest requestArgs@{ route: Route route } { cache, checkGitHub } = do
+--   let codec = CA.Common.either githubApiErrorCodec CA.json
+--   entry <- liftEffect (Cache.readJsonEntry codec route cache)
+--   now <- liftEffect nowUTC
+--   ExceptT $ case entry of
+--     Left _ -> do
+--       Console.log $ "CACHE MISS: Malformed or no entry for " <> route
+--       result <- Except.runExceptT $ runRequest requestArgs
+--       liftEffect $ Cache.writeJsonEntry codec route result cache
+--       pure result
+
+--     Right cached -> case cached.value of
+--       Left err
+--         -- We don't retry 404 errors because they indicate a missing resource.
+--         | err.statusCode == 404 -> pure $ Left err
+--         -- Otherwise, if we have an error in cache, we retry the request; we
+--         -- don't have anything usable we could return.
+--         | otherwise -> do
+--             Console.log $ "CACHE ERROR: Deleting non-404 error entry and retrying " <> route
+--             Console.logShow err
+--             liftEffect $ cache.remove route
+--             Except.runExceptT $ cachedRequest runRequest requestArgs { cache, checkGitHub }
+
+--       -- If we do have a usable cache value, then we will defer to GitHub's
+--       -- judgment on whether to use it or not. We do that by making a request
+--       -- with the 'If-Not-Modified' header. A 304 response means the resource
+--       -- has not changed, and GitHub promises not to consume a request if so.
+--       --
+--       -- Unfortunately, GitHub is not currently (2022-07-01) honoring this
+--       -- promise, so we (temporarily) only retry after N hours have passed. Once
+--       -- they start honoring the promise again we can remove the modified time
+--       -- guard below.
+--       --
+--       -- TODO: Remove DateTime.diff when GitHub honors requests again.
+--       Right payload
+--         | checkGitHub, DateTime.diff now cached.modified >= Duration.Hours 1.0 -> do
+--             Console.log $ "CACHE EXPIRED: " <> route
+--             let _gitHubTime = Formatter.DateTime.format formatRFC1123 cached.modified
+--             result <- Except.runExceptT $ runRequest $ requestArgs
+--             {- TODO: Re-enable when GitHub honors requests again.
+--             result <- Except.runExceptT $ runRequest $ requestArgs
+--               { headers = Object.insert "If-Modified-Since" gitHubTime requestArgs.headers }
+--             -}
+--             case result of
+--               -- A 304 response means the resource has not changed and we should
+--               -- return from cache.
+--               Left err | err.statusCode == 304 -> do
+--                 pure $ Right payload
+--               _ -> do
+--                 liftEffect $ Cache.writeJsonEntry codec route result cache
+--                 pure result
+--         | otherwise ->
+--             pure $ Right payload
+
+-- -- GitHub uses the RFC1123 time format: "Thu, 05 Jul 2022"
+-- -- http://www.csgnetwork.com/timerfc1123calc.html
+-- --
+-- -- It expects the time to be in UTC.
+-- formatRFC1123 :: Formatter
+-- formatRFC1123 = List.fromFoldable
+--   [ DayOfWeekNameShort
+--   , Placeholder ", "
+--   , DayOfMonthTwoDigits
+--   , Placeholder " "
+--   , MonthShort
+--   , Placeholder " "
+--   , YearFull
+--   , Placeholder " "
+--   , Hours24
+--   , Placeholder ":"
+--   , MinutesTwoDigits
+--   , Placeholder ":"
+--   , SecondsTwoDigits
+--   , Placeholder " "
+--   , Placeholder "UTC"
+--   ]

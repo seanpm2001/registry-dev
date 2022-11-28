@@ -40,6 +40,8 @@ data Index a
 
 derive instance Functor Index
 
+-- | An effect for interacting with Registry indices of package manifests and
+-- | package metadata.
 type INDEX r = (index :: Index | r)
 
 _index :: Proxy "index"
