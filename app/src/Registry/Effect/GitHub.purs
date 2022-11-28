@@ -37,10 +37,9 @@ import Foreign.Object as Object
 import Node.Path as Path
 import Registry.App.Json (JsonCodec)
 import Registry.App.Json as Json
-import Registry.App.RegistryCache (RegistryCache(..))
-import Registry.App.RegistryCache as App.RegistryCache
 import Registry.Constants as Constants
 import Registry.Effect.Cache (CACHE)
+import Registry.Effect.Cache as Cache
 import Registry.Effect.Log (LOG)
 import Registry.Effect.Log as Log
 import Registry.ManifestIndex as ManifestIndex
@@ -97,7 +96,7 @@ getCommitDate address ref = Run.lift _github (GetCommitDate address ref identity
 
 -- | An effectful handler for the GITHUB effect which makes calls to GitHub
 -- | using Octokit.
-handleGitHubAff :: forall r a. Octokit -> GitHub a -> Run (CACHE RegistryCache + LOG + AFF + r) a
+handleGitHubAff :: forall r a. Octokit -> GitHub a -> Run (CACHE + LOG + AFF + r) a
 handleGitHubAff octokit = case _ of
   ListTags address reply -> do
     Log.debug $ "Listing tags for " <> show address
@@ -194,7 +193,7 @@ type RegistryGitHubEnv =
 -- | Handle the registry repo effect by closing issues and committing to the
 -- | /registry and /registry-index repositories. Requires the Pacchettibotti
 -- | auth token.
-handleRegistryRepoGitHub :: forall r a. RegistryGitHubEnv -> RegistryRepo a -> Run (CACHE RegistryCache + AFF + LOG + r) a
+handleRegistryRepoGitHub :: forall r a. RegistryGitHubEnv -> RegistryRepo a -> Run (CACHE + AFF + LOG + r) a
 handleRegistryRepoGitHub { octokit, issue, pacchettibotti, registryPath, registryIndexPath } = case _ of
   CloseIssue next -> do
     request octokit (GitHub.closeIssue Constants.registry issue) >>= case _ of
@@ -286,18 +285,18 @@ requestWithBackoff octokit githubRequest = do
 -- | A helper function for implementing GET requests to the GitHub API that
 -- | relies on the GitHub API to report whether there is any new data, and falls
 -- | back to the cache if there is not.
-request :: forall r a. GitHub.Octokit -> GitHub.Request a -> Run (CACHE RegistryCache + LOG + AFF + r) (Either GitHubError a)
+request :: forall r a. GitHub.Octokit -> GitHub.Request a -> Run (CACHE + LOG + AFF + r) (Either GitHubError a)
 request octokit githubRequest@{ route, codec } = do
   -- We cache GET requests, other than requests to fetch the current rate limit.
   case GitHub.routeMethod route of
     GET | route /= GitHub.getRateLimit.route -> do
-      entry <- App.RegistryCache.get (GitHubRequest route)
+      entry <- Cache.get (Cache.GitHubRequest route)
       now <- Run.liftAff $ liftEffect nowUTC
       case entry of
         Nothing -> do
           Log.debug $ "No cache entry for route " <> GitHub.printRoute route
           result <- requestWithBackoff octokit githubRequest
-          App.RegistryCache.put (GitHubRequest route) (map (Json.encode codec) result)
+          Cache.put (Cache.GitHubRequest route) (map (Json.encode codec) result)
           pure result
 
         Just cached -> case cached.value of
@@ -310,7 +309,7 @@ request octokit githubRequest@{ route, codec } = do
             -- don't have anything usable we could return.
             | otherwise -> do
                 Log.debug $ "Retrying route " <> GitHub.printRoute route <> " because cache contains non-404 error: " <> show err
-                App.RegistryCache.delete (GitHubRequest route)
+                Cache.delete (Cache.GitHubRequest route)
                 request octokit githubRequest
 
           Left otherError -> do
@@ -339,7 +338,7 @@ request octokit githubRequest@{ route, codec } = do
                 Log.debug $ "Received confirmation of cache validity response from GitHub, reading cache value..."
                 pure result
               _ -> do
-                App.RegistryCache.put (GitHubRequest route) (map (Json.encode codec) result)
+                Cache.put (Cache.GitHubRequest route) (map (Json.encode codec) result)
                 pure result
 
           Right value -> case Json.decode codec value of

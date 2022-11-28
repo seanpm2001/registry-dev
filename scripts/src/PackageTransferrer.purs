@@ -20,7 +20,6 @@ import Node.Path as Path
 import Node.Process as Node.Process
 import Registry.App.API (LegacyRegistryFile(..), Source(..))
 import Registry.App.API as API
-import Registry.App.Cache as Cache
 import Registry.App.RegistryM (RegistryM, readPackagesMetadata, throwWithComment)
 import Registry.App.RegistryM as RegistryM
 import Registry.Legacy.LenientVersion as LenientVersion

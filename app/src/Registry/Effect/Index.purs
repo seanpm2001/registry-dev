@@ -12,10 +12,9 @@ import Foreign.FastGlob as FastGlob
 import Node.FS.Aff as FS.Aff
 import Node.Path as Path
 import Registry.App.Json as Json
-import Registry.App.RegistryCache (RegistryCache)
-import Registry.App.RegistryCache as RegistryCache
 import Registry.Constants as Constants
 import Registry.Effect.Cache (CACHE)
+import Registry.Effect.Cache as Cache
 import Registry.Effect.GitHub (REGISTRY_REPO)
 import Registry.Effect.GitHub as GitHub
 import Registry.Effect.Log (LOG)
@@ -73,7 +72,7 @@ type IndexEnv =
   , registryIndexPath :: FilePath
   }
 
-handleIndex :: forall r a. IndexEnv -> Index a -> Run (REGISTRY_REPO + CACHE RegistryCache + LOG + AFF + r) a
+handleIndex :: forall r a. IndexEnv -> Index a -> Run (REGISTRY_REPO + CACHE + LOG + AFF + r) a
 handleIndex { registryPath, registryIndexPath } = case _ of
   ReadMetadataIndex reply -> do
     let metadataDir = Path.concat [ registryPath, Constants.packageMetadataDirectory ]
@@ -138,7 +137,7 @@ handleIndex { registryPath, registryIndexPath } = case _ of
 
   ReadManifest name version reply -> do
     Log.debug $ "Reading manifest for " <> formatPackageVersion name version <> "..."
-    RegistryCache.get (RegistryCache.ManifestFile name version) >>= case _ of
+    Cache.get (Cache.ManifestFile name version) >>= case _ of
       Nothing -> do
         Run.liftAff (ManifestIndex.readEntryFile registryIndexPath name) >>= case _ of
           Left error -> do
@@ -150,17 +149,17 @@ handleIndex { registryPath, registryIndexPath } = case _ of
                 Log.debug $ "Found entries for package " <> PackageName.print name <> " but none for version " <> Version.print version
                 pure $ reply Nothing
               Just entry -> do
-                RegistryCache.put (RegistryCache.ManifestFile name version) entry
+                Cache.put (Cache.ManifestFile name version) entry
                 pure $ reply $ Just entry
       Just cached ->
-        pure $ reply $ Just cached
+        pure $ reply $ Just cached.value
 
   WriteManifest manifest@(Manifest { name, version }) next -> do
     Log.debug $ "Writing manifest for " <> formatPackageVersion name version
     Run.liftAff (ManifestIndex.insertIntoEntryFile registryIndexPath manifest) >>= case _ of
       Left error -> Log.die $ "Could not write manifest file: " <> error
       Right _ -> do
-        RegistryCache.put (RegistryCache.ManifestFile name version) manifest
+        Cache.put (Cache.ManifestFile name version) manifest
         GitHub.commitManifest name version
         pure next
 
@@ -169,6 +168,6 @@ handleIndex { registryPath, registryIndexPath } = case _ of
     Run.liftAff (ManifestIndex.removeFromEntryFile registryIndexPath name version) >>= case _ of
       Left error -> Log.die $ "Could not remove manifest file: " <> error
       Right _ -> do
-        RegistryCache.delete (RegistryCache.ManifestFile name version)
+        Cache.delete (Cache.ManifestFile name version)
         GitHub.commitManifest name version
         pure next

@@ -2,7 +2,6 @@ module Registry.Effect.Log where
 
 import Registry.App.Prelude
 
-import Control.Monad.Except as Except
 import Data.Array as Array
 import Data.Formatter.DateTime as Formatter.DateTime
 import Effect.Class.Console as Console

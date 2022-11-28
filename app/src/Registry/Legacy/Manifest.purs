@@ -24,11 +24,10 @@ import Node.ChildProcess as NodeProcess
 import Node.FS.Aff as FSA
 import Node.Path as Path
 import Registry.App.Json as Json
-import Registry.App.RegistryCache (RegistryCache)
-import Registry.App.RegistryCache as App.Cache
 import Registry.App.Types (LegacyPackageSet(..), LegacyPackageSetEntry, LegacyPackageSetUnion)
 import Registry.App.Types as Types
 import Registry.Effect.Cache (CACHE)
+import Registry.Effect.Cache as Cache
 import Registry.Effect.GitHub (GITHUB)
 import Registry.Effect.GitHub as Effect.GitHub
 import Registry.Effect.Log (LOG)
@@ -361,7 +360,7 @@ type LegacyPackageSetEntries = Map PackageName (Map RawVersion (Map PackageName 
 legacyPackageSetEntriesCodec :: JsonCodec LegacyPackageSetEntries
 legacyPackageSetEntriesCodec = Internal.Codec.packageMap $ rawVersionMapCodec $ Internal.Codec.packageMap rawVersionCodec
 
-fetchLegacyPackageSets :: forall r. Run (CACHE RegistryCache + GITHUB + LOG + AFF + r) LegacyPackageSetEntries
+fetchLegacyPackageSets :: forall r. Run (CACHE + GITHUB + LOG + AFF + r) LegacyPackageSetEntries
 fetchLegacyPackageSets = do
   result <- Effect.GitHub.listTags Legacy.PackageSet.legacyPackageSetsRepo
   tags <- case result of
@@ -385,16 +384,16 @@ fetchLegacyPackageSets = do
   -- It's important that we cache the end result of unioning all package sets
   -- because the package sets are quite large and it's expensive to read them
   -- all into memory and fold over them.
-  App.Cache.get (App.Cache.LegacyPackageSetUnion tagsSha) >>= case _ of
+  Cache.get (Cache.LegacyPackageSetUnion tagsSha) >>= case _ of
     Nothing -> do
       Log.debug $ "Building legacy package set union..."
 
       entries :: Array LegacyPackageSetUnion <- for tags \ref -> do
-        legacySet <- App.Cache.get (App.Cache.LegacyPackageSet ref) >>= case _ of
+        legacySet <- Cache.get (Cache.LegacyPackageSet ref) >>= case _ of
           Nothing -> do
             Log.debug $ "Building legacy package set for " <> ref
             legacySet <- Effect.GitHub.getJsonFile Legacy.PackageSet.legacyPackageSetsRepo ref Types.legacyPackageSetCodec "packages.json"
-            App.Cache.put (App.Cache.LegacyPackageSet ref) legacySet
+            Cache.put (Cache.LegacyPackageSet ref) legacySet
             pure legacySet
 
           Just stored ->
@@ -409,7 +408,7 @@ fetchLegacyPackageSets = do
 
       let merged = Array.foldl (\m set -> Map.unionWith Map.union set m) Map.empty entries
       Log.debug $ "Successfully produced new union of legacy package sets."
-      App.Cache.put (App.Cache.LegacyPackageSetUnion tagsSha) merged
+      Cache.put (Cache.LegacyPackageSetUnion tagsSha) merged
       pure merged
 
     Just stored ->
