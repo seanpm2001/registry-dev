@@ -5,9 +5,10 @@ import Registry.App.Prelude
 
 import Data.Argonaut.Core (Json)
 import Data.Codec.Argonaut as CA
+import Data.Codec.Argonaut.Common as CA.Common
 import Data.Exists as Exists
 import Foreign.GitHub as GitHub
-import Registry.Effect.Cache (class Functor2, CACHE, CacheKey, JsonEncodedBox(..), JsonKeyHandler)
+import Registry.Effect.Cache (class Functor2, CACHE, CacheKey, JsonEncodedBox(..), JsonKeyHandler, CacheEntry)
 import Registry.Effect.Cache as Cache
 import Registry.Manifest as Manifest
 import Registry.PackageName as PackageName
@@ -19,7 +20,7 @@ import Run as Run
 -- | use the 'get', 'put', and 'delete' functions from this module.
 data RegistryCache (c :: Type -> Type -> Type) a
   = ManifestFile PackageName Version (c Manifest.Manifest a)
-  | GitHubRequest GitHub.Route (c Json a)
+  | GitHubRequest GitHub.Route (c (Either GitHub.GitHubError Json) a)
 
 -- Ideally, with quantified constraints, this could be written as:
 --   (forall x. Functor (c x)) => Functor (RegistryCache c)
@@ -49,7 +50,7 @@ keyHandler = case _ of
     }
   GitHubRequest route next -> Exists.mkExists $ flip JsonKey next
     { id: "GitHubRequest__" <> GitHub.printRoute route
-    , codec: CA.json
+    , codec: CA.Common.either GitHub.githubErrorCodec CA.json
     }
 
 -- | Get an item from the registry cache.
@@ -58,7 +59,7 @@ keyHandler = case _ of
 -- | getPrelude :: forall r. Run (CACHE RegistryCache + r) (Maybe Manifest)
 -- | getPrelude = get (ManifestFile (PackageName "prelude") (Version "1.0.0")
 -- | ```
-get :: forall a r. CacheKey RegistryCache a -> Run (CACHE RegistryCache + r) (Maybe a)
+get :: forall a r. CacheKey RegistryCache a -> Run (CACHE RegistryCache + r) (Maybe (CacheEntry a))
 get key = Run.lift Cache._cache (Cache.get key)
 
 -- | Put an item from the registry cache.

@@ -1,5 +1,6 @@
 module Foreign.GitHub
   ( Address
+  , Base64String(..)
   , Event(..)
   , GitHubAPIError
   , GitHubError(..)
@@ -16,7 +17,9 @@ module Foreign.GitHub
   , TeamMember
   , closeIssue
   , createComment
+  , decodeBase64String
   , decodeEvent
+  , formatRFC1123
   , getCommitDate
   , getContent
   , getRateLimit
@@ -29,6 +32,8 @@ module Foreign.GitHub
   , printGitHubError
   , printRoute
   , request
+  , routeMethod
+  , routePath
   , tagCodec
   ) where
 
@@ -38,15 +43,18 @@ import Affjax as Http
 import Control.Promise (Promise)
 import Control.Promise as Promise
 import Data.Array as Array
-import Data.Codec.Argonaut (JsonCodec, JsonDecodeError(..))
+import Data.Codec.Argonaut (JsonCodec, JsonDecodeError)
 import Data.Codec.Argonaut as CA
 import Data.Codec.Argonaut.Variant as CA.Variant
 import Data.DateTime (DateTime)
 import Data.DateTime.Instant (Instant)
 import Data.DateTime.Instant as Instant
+import Data.Formatter.DateTime (Formatter, FormatterCommand(..))
 import Data.HTTP.Method (Method(..))
 import Data.Int as Int
+import Data.List as List
 import Data.Map as Map
+import Data.Newtype (unwrap)
 import Data.Profunctor as Profunctor
 import Data.String as String
 import Data.String.Base64 as Base64
@@ -96,7 +104,7 @@ derive newtype instance Eq IssueNumber
 type Team = { org :: String, team :: String }
 
 -- | Member of a GitHub organization
-type TeamMember = { username :: String, userId :: Int }
+type TeamMember = { login :: String, id :: Int }
 
 -- | List members of the given team
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/teams/listMembersInOrg.md
@@ -105,19 +113,12 @@ listTeamMembers team =
   { route: Route GET [ "orgs", team.org, "teams", team.team, "members" ] Map.empty
   , headers: Object.empty
   , args: noArgs
-  , paginated: true
-  , decode: decodeTeamMembers
+  , paginate: true
+  , codec
   }
   where
-  decodeTeamMembers :: Json -> Either JsonDecodeError (Array TeamMember)
-  decodeTeamMembers = Json.decode (CA.array CA.json) >=> traverse decodeTeamMember
-
-  decodeTeamMember :: Json -> Either JsonDecodeError TeamMember
-  decodeTeamMember json = do
-    object <- Json.decode CA.jobject json
-    username <- Json.atKey "login" CA.string object
-    userId <- Json.atKey "id" CA.int object
-    pure { username, userId }
+  codec :: JsonCodec (Array TeamMember)
+  codec = CA.array $ Json.object "TeamMember" { login: CA.string, id: CA.int }
 
 -- | List repository tags
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/repos/listTags.md
@@ -126,46 +127,49 @@ listTags address =
   { route: Route GET [ "repos", address.owner, address.repo, "tags" ] Map.empty
   , headers: Object.empty
   , args: noArgs
-  , paginated: true
-  , decode: decodeTags
+  , paginate: true
+  , codec: CA.array tagCodec
   }
-  where
-  decodeTags :: Json -> Either JsonDecodeError (Array Tag)
-  decodeTags = Json.decode (CA.array CA.json) >=> traverse decodeTag
 
-  decodeTag :: Json -> Either JsonDecodeError Tag
-  decodeTag json = do
-    object <- Json.decode CA.jobject json
-    name <- Json.atKey "name" CA.string object
-    commitObject <- Json.atKey "commit" CA.jobject object
-    sha <- Json.atKey "sha" CA.string commitObject
-    url <- Json.atKey "url" CA.string commitObject
-    pure { name, sha, url }
+-- | A newline-delimited base64-encoded file retrieved from the GitHub API
+newtype Base64String = Base64String String
+
+derive instance Newtype Base64String _
+
+decodeBase64String :: Base64String -> Either String String
+decodeBase64String (Base64String string) =
+  case traverse Base64.decode $ String.split (String.Pattern "\n") string of
+    Left error -> Left $ Exception.message error
+    Right values -> Right $ fold values
 
 -- | Fetch a specific file  from the provided repository at the given ref and
 -- | filepath. Filepaths should lead to a single file from the root of the repo.
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/repos/getContent.md
-getContent :: Address -> String -> FilePath -> Request String
+getContent :: Address -> String -> FilePath -> Request Base64String
 getContent address ref path =
   { route: Route GET [ "repos", address.owner, address.repo, "contents", path ] (Map.singleton "ref" ref)
   , headers: Object.empty
   , args: noArgs
-  , paginated: false
-  , decode: decodeFile
+  , paginate: false
+  , codec: base64FileCodec
   }
   where
-  decodeFile :: Json -> Either JsonDecodeError String
-  decodeFile json = do
-    object <- Json.decode CA.jobject json
-    data_ <- Json.atKey "data" CA.jobject object
-    type_ <- Json.atKey "type" CA.string data_
-    encoding <- Json.atKey "encoding" CA.string data_
-    if encoding == "base64" && type_ == "file" then do
-      contentsb64 <- Json.atKey "content" CA.string data_
-      contents <- lmap (\err -> TypeMismatch ("Base64: " <> Exception.message err)) $ traverse Base64.decode $ String.split (String.Pattern "\n") contentsb64
-      pure $ fold contents
-    else
-      Left $ TypeMismatch $ "Base64: " <> show { encoding, type: type_ }
+  base64FileCodec :: JsonCodec Base64String
+  base64FileCodec = Profunctor.dimap toJsonRep fromJsonRep $ Json.object "Content"
+    { data: Json.object "Content.data"
+        { type: value "file"
+        , encoding: value "base64"
+        , content: CA.string
+        }
+    }
+    where
+    toJsonRep (Base64String str) = { data: { type: "file", encoding: "base64", content: str } }
+    fromJsonRep { data: { content } } = Base64String content
+
+    value :: String -> JsonCodec String
+    value expected = CA.codec'
+      (\json -> CA.decode CA.string json >>= \decoded -> if decoded == expected then pure expected else Left (CA.UnexpectedValue json))
+      (\_ -> CA.encode CA.string expected)
 
 -- | Fetch the commit SHA for a given ref on a GitHub repository
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/git/getRef.md
@@ -174,15 +178,19 @@ getRefCommit address ref = do
   { route: Route GET [ "repos", address.owner, address.repo, "git", "ref", ref ] Map.empty
   , headers: Object.empty
   , args: noArgs
-  , paginated: false
-  , decode: decodeRefSha
+  , paginate: false
+  , codec
   }
   where
-  decodeRefSha :: Json -> Either JsonDecodeError String
-  decodeRefSha json = do
-    object <- Json.decode CA.jobject json
-    innerObject <- Json.atKey "object" CA.jobject object
-    Json.atKey "sha" CA.string innerObject
+  codec :: JsonCodec String
+  codec = Profunctor.dimap toJsonRep fromJsonRep $ Json.object "Ref"
+    { object: Json.object "Ref.object"
+        { sha: CA.string
+        }
+    }
+
+  toJsonRep sha = { object: { sha } }
+  fromJsonRep = _.object.sha
 
 -- | Fetch the date associated with a given commit, in the RFC3339String format.
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/git/getCommit.md
@@ -191,15 +199,19 @@ getCommitDate address commitSha = do
   { route: Route GET [ "repos", address.owner, address.repo, "git", "commits", commitSha ] Map.empty
   , headers: Object.empty
   , args: noArgs
-  , paginated: true
-  , decode: decodeCommit
+  , paginate: false
+  , codec
   }
   where
-  decodeCommit :: Json -> Either JsonDecodeError DateTime
-  decodeCommit json = do
-    object <- Json.decode CA.jobject json
-    committerObject <- Json.atKey "committer" CA.jobject object
-    Json.atKey "date" Internal.Codec.iso8601DateTime committerObject
+  codec :: JsonCodec DateTime
+  codec = Profunctor.dimap toJsonRep fromJsonRep $ Json.object "Commit"
+    { committer: Json.object "Commit.committer"
+        { date: Internal.Codec.iso8601DateTime
+        }
+    }
+
+  toJsonRep date = { committer: { date } }
+  fromJsonRep = _.committer.date
 
 -- | Create a comment on an issue. Requires authentication.
 -- | https://github.com/octokit/plugin-rest-endpoint-methods.js/blob/v5.16.0/docs/issues/createComment.md
@@ -208,8 +220,8 @@ createComment address (IssueNumber issue) body = do
   { route: Route POST [ "repos", address.owner, address.repo, "issues", show issue, "comments" ] Map.empty
   , headers: Object.empty
   , args: toJSArgs { body }
-  , paginated: false
-  , decode: \_ -> pure unit
+  , paginate: false
+  , codec: CA.codec' (\_ -> pure unit) (Json.encode CA.null)
   }
 
 -- | Close an issue. Requires authentication.
@@ -219,8 +231,8 @@ closeIssue address (IssueNumber issue) =
   { route: Route PATCH [ "repos", address.owner, address.repo, "issues", show issue ] Map.empty
   , headers: Object.empty
   , args: toJSArgs { state: "closed" }
-  , paginated: false
-  , decode: \_ -> pure unit
+  , paginate: false
+  , codec: CA.codec' (\_ -> pure unit) (Json.encode CA.null)
   }
 
 type RateLimit =
@@ -235,21 +247,29 @@ getRateLimit = do
   { route: Route GET [ "rate_limit" ] Map.empty
   , headers: Object.empty
   , args: noArgs
-  , paginated: false
-  , decode: decodeRateLimit
+  , paginate: false
+  , codec
   }
   where
-  decodeRateLimit :: Json -> Either JsonDecodeError RateLimit
-  decodeRateLimit json = do
-    object <- Json.decode CA.jobject json
-    dataObject <- Json.atKey "data" CA.jobject object
-    resourcesObject <- Json.atKey "resources" CA.jobject dataObject
-    coreObject <- Json.atKey "core" CA.jobject resourcesObject
-    limit <- Json.atKey "limit" CA.int coreObject
-    remaining <- Json.atKey "remaining" CA.int coreObject
-    reset <- Json.atKey "reset" CA.number coreObject
-    let resetTime = Instant.instant $ Duration.Milliseconds $ reset * 1000.0
-    pure { limit, remaining, resetTime }
+  codec :: JsonCodec RateLimit
+  codec = Profunctor.dimap toJsonRep fromJsonRep $ Json.object "RateLimit"
+    { data: Json.object "RateLimit.data"
+        { resources: Json.object "RateLimit.data.resources"
+            { core: Json.object "RateLimit.data.resources.core"
+                { limit: CA.int
+                , remaining: CA.int
+                , reset: CA.number
+                }
+            }
+        }
+    }
+
+  toJsonRep { limit, remaining, resetTime } = do
+    let reset = fromMaybe (-9999.0) ((unwrap <<< Instant.unInstant) <$> resetTime)
+    { data: { resources: { core: { limit, remaining, reset } } } }
+
+  fromJsonRep { data: { resources: { core: { limit, remaining, reset } } } } =
+    { limit, remaining, resetTime: Instant.instant $ Duration.Milliseconds $ reset * 1000.0 }
 
 -- | A route for the GitHub API, ie. "GET /repos/purescript/registry/tags".
 -- | Meant for internal use.
@@ -257,6 +277,12 @@ data Route = Route Method (Array String) (Map String String)
 
 derive instance Eq Route
 derive instance Ord Route
+
+routeMethod :: Route -> Method
+routeMethod (Route method _ _) = method
+
+routePath :: Route -> Array String
+routePath (Route _ path _) = path
 
 printRoute :: Route -> String
 printRoute (Route method segments params) = show method <> " " <> printPath <> printParams
@@ -280,8 +306,8 @@ type Request a =
   { route :: Route
   , headers :: Object String
   , args :: JSArgs
-  , paginated :: Boolean
-  , decode :: Json -> Either Json.JsonDecodeError a
+  , paginate :: Boolean
+  , codec :: JsonCodec a
   }
 
 foreign import requestImpl :: forall r. EffectFn6 Octokit String (Object String) JSArgs (Object Json -> r) (Json -> r) (Promise r)
@@ -289,13 +315,13 @@ foreign import paginateImpl :: forall r. EffectFn6 Octokit String (Object String
 
 -- | Make a request to the GitHub API.
 request :: forall a. Octokit -> Request a -> Aff (Either GitHubError a)
-request octokit { route, headers, args, paginated, decode } = do
-  result <- Promise.toAffE $ runEffectFn6 (if paginated then paginateImpl else requestImpl) octokit (printRoute route) headers args Left Right
+request octokit { route, headers, args, paginate, codec } = do
+  result <- Promise.toAffE $ runEffectFn6 (if paginate then paginateImpl else requestImpl) octokit (printRoute route) headers args Left Right
   pure $ case result of
     Left githubError -> case decodeGitHubAPIError githubError of
       Left decodeError -> Left $ UnexpectedError $ Json.printJsonDecodeError decodeError
       Right decoded -> Left $ APIError decoded
-    Right json -> case decode json of
+    Right json -> case Json.decode codec json of
       Left decodeError -> Left $ DecodeError $ Json.printJsonDecodeError decodeError
       Right parsed -> Right parsed
   where
@@ -335,11 +361,16 @@ type Address = { owner :: String, repo :: String }
 type Tag = { name :: String, sha :: String, url :: Http.URL }
 
 tagCodec :: JsonCodec Tag
-tagCodec = Json.object "Tag"
+tagCodec = Profunctor.dimap toJsonRep fromJsonRep $ Json.object "Tag"
   { name: CA.string
-  , sha: CA.string
-  , url: CA.string
+  , commit: Json.object "Tag.Commit"
+      { sha: CA.string
+      , url: CA.string
+      }
   }
+  where
+  toJsonRep { name, sha, url } = { name, commit: { sha, url } }
+  fromJsonRep { name, commit } = { name, sha: commit.sha, url: commit.url }
 
 parseRepo :: PackageURL -> Either ParseError Address
 parseRepo (PackageURL input) = Parsing.runParser input do
@@ -417,3 +448,26 @@ githubApiErrorCodec = Json.object "GitHubAPIError"
   { statusCode: CA.int
   , message: CA.string
   }
+
+-- GitHub uses the RFC1123 time format: "Thu, 05 Jul 2022"
+-- http://www.csgnetwork.com/timerfc1123calc.html
+--
+-- It expects the time to be in UTC.
+formatRFC1123 :: Formatter
+formatRFC1123 = List.fromFoldable
+  [ DayOfWeekNameShort
+  , Placeholder ", "
+  , DayOfMonthTwoDigits
+  , Placeholder " "
+  , MonthShort
+  , Placeholder " "
+  , YearFull
+  , Placeholder " "
+  , Hours24
+  , Placeholder ":"
+  , MinutesTwoDigits
+  , Placeholder ":"
+  , SecondsTwoDigits
+  , Placeholder " "
+  , Placeholder "UTC"
+  ]

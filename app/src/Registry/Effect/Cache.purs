@@ -7,7 +7,9 @@ import Data.Argonaut.Core as Argonaut.Core
 import Data.Argonaut.Parser as Argonaut.Parser
 import Data.Codec.Argonaut (JsonCodec)
 import Data.Codec.Argonaut as CA
+import Data.Codec.Argonaut.Record as CA.Record
 import Data.Const (Const(..))
+import Data.DateTime (DateTime(..))
 import Data.Either (Either(..), hush)
 import Data.Exists (Exists)
 import Data.Exists as Exists
@@ -24,8 +26,10 @@ import Node.Encoding (Encoding(..))
 import Node.FS.Aff as FS.Aff
 import Node.Path (FilePath)
 import Partial.Unsafe (unsafeCrashWith)
+import Registry.App.Prelude (nowUTC)
 import Registry.Effect.Log (LOG)
 import Registry.Effect.Log as Log
+import Registry.Internal.Codec as Internal.Codec
 import Run (AFF, Run)
 import Run as Run
 import Run.Reader as Run.Reader
@@ -37,7 +41,7 @@ import Type.Row (type (+))
 class Functor2 (c :: Type -> Type -> Type) where
   map2 :: forall a b z. (a -> b) -> c z a -> c z b
 
-newtype Reply a b = Reply (Maybe a -> b)
+newtype Reply a b = Reply (Maybe (CacheEntry a) -> b)
 
 instance Functor2 Reply where
   map2 k (Reply f) = Reply (map k f)
@@ -58,6 +62,17 @@ derive instance (Functor (k Reply), Functor (k Ignore)) => Functor (Cache k)
 type CacheKey :: ((Type -> Type -> Type) -> Type -> Type) -> Type -> Type
 type CacheKey k a = forall c b. c a b -> k c b
 
+type CacheEntry a =
+  { modified :: DateTime
+  , value :: a
+  }
+
+cacheEntryCodec :: forall a. JsonCodec a -> JsonCodec (CacheEntry a)
+cacheEntryCodec codec = CA.Record.object "CacheEntry"
+  { modified: Internal.Codec.iso8601DateTime
+  , value: codec
+  }
+
 -- | Get a value from the cache, given an appropriate cache key. This function
 -- | is useful for defining a concrete 'get' for a user-defined key type:
 -- |
@@ -66,10 +81,10 @@ type CacheKey k a = forall c b. c a b -> k c b
 -- |
 -- | data Key c a = ManifestFile PackageName Version (c Manifest a)
 -- |
--- | getItem :: forall a r. CacheKey Key a -> Run (CACHE Key + r) (Maybe a)
+-- | getItem :: forall a r. CacheKey Key a -> Run (CACHE Key + r) (Maybe (CacheEntry a))
 -- | getItem key = Run.lift _cache (get key)
 -- | ```
-get :: forall k a. CacheKey k a -> Cache k (Maybe a)
+get :: forall k a. CacheKey k a -> Cache k (Maybe (CacheEntry a))
 get key = Get (key (Reply identity))
 
 -- | Put a value in the cache, given an appropriate cache key. This function
@@ -145,23 +160,7 @@ type JsonKeyHandler key = forall b z. key z b -> JsonEncoded z b
 data JsonEncodedBox :: (Type -> Type -> Type) -> Type -> Type -> Type
 data JsonEncodedBox z b a = JsonKey (JsonKey a) (z a b)
 
--- |
 type JsonEncoded z b = Exists (JsonEncodedBox z b)
-
--- | Run a cache in memory only.
-handleCachePure :: forall key a r. JsonKeyHandler key -> Cache key a -> Run (STATE (Map String Json) + r) a
-handleCachePure handler = case _ of
-  Get key -> handler key # Exists.runExists \(JsonKey { id, codec } (Reply reply)) -> do
-    state <- Run.State.get
-    pure $ reply $ hush <<< CA.decode codec =<< Map.lookup id state
-
-  Put key next -> handler key # Exists.runExists \(JsonKey { id, codec } (Const value)) -> do
-    Run.State.modify (Map.insert id (CA.encode codec value))
-    pure next
-
-  Delete key -> handler key # Exists.runExists \(JsonKey { id } (Ignore next)) -> do
-    Run.State.modify (Map.delete id)
-    pure next
 
 -- | Run a cache backed by the file system. The cache will try to minimize
 -- | writes and reads to the file system by storing data in memory when possible.
@@ -182,7 +181,7 @@ handleCacheFileSystem handler = Run.Reader.runReader (unsafePerformEffect (Ref.n
                 Log.debug $ "Invalid JSON for " <> id <> ":\n" <> value <> ").\nParsing failed with error: " <> error <> "\nRemoving from cache!"
                 deleteMemoryAndDisk id
                 pure $ reply Nothing
-              Right json -> case CA.decode codec json of
+              Right json -> case CA.decode (cacheEntryCodec codec) json of
                 Left error -> do
                   Log.debug $ "Failed to decode JSON for " <> id <> ":\n" <> value <> ").\nParsing failed with error: " <> CA.printJsonDecodeError error <> "\nRemoving from cache!"
                   deleteMemoryAndDisk id
@@ -192,7 +191,7 @@ handleCacheFileSystem handler = Run.Reader.runReader (unsafePerformEffect (Ref.n
 
       Just json -> do
         Log.debug $ "Found " <> id <> " in memory cache!"
-        case CA.decode codec json of
+        case CA.decode (cacheEntryCodec codec) json of
           Left error -> do
             Log.debug $ "Failed to decode JSON for " <> id <> ":\n" <> Argonaut.Core.stringify json <> ").\nParsing failed with error: " <> CA.printJsonDecodeError error <> "\nRemoving from cache!"
             deleteMemoryAndDisk id
@@ -200,10 +199,10 @@ handleCacheFileSystem handler = Run.Reader.runReader (unsafePerformEffect (Ref.n
           Right decoded ->
             pure $ reply $ Just decoded
 
-  -- TODO: Record the current time? Requires adding '{ modified :: DateTime, value :: a }' to 'Reply'.
   Put key next -> handler key # Exists.runExists \(JsonKey { id, codec } (Const value)) -> do
     Log.debug $ "Putting " <> id <> " in cache..."
-    let encoded = CA.encode codec value
+    now <- Run.liftAff $ liftEffect nowUTC
+    let encoded = CA.encode (cacheEntryCodec codec) { modified: now, value }
     readMemory >>= Map.lookup id >>> case _ of
       Just previous | encoded == previous -> do
         Log.debug "Put value matches old value, skipping update."

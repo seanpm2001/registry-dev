@@ -284,7 +284,7 @@ runOperation source operation = case operation of
           , GitHub.printGitHubError githubError
           ]
         Right members -> do
-          unless (Array.elem username (map _.username members)) do
+          unless (Array.elem username (map _.login members)) do
             throwWithComment $ String.joinWith " "
               [ "This package set update changes the compiler version or"
               , "removes a package from the package set. Only members of the"

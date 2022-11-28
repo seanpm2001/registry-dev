@@ -1,14 +1,43 @@
-module Registry.Effect.GitHub where
+module Registry.Effect.GitHub
+  ( GITHUB
+  , GitHub(..)
+  , REGISTRY_REPO
+  , RegistryGitHubEnv
+  , RegistryRepo(..)
+  , _github
+  , _registryRepo
+  , closeIssue
+  , commitManifest
+  , commitMetadata
+  , commitPackageSet
+  , getCommitDate
+  , getContent
+  , getRefCommit
+  , handleGitHubAff
+  , handleRegistryRepoGitHub
+  , handleRegistryRepoPure
+  , listTags
+  , listTeamMembers
+  ) where
 
 import Registry.App.Prelude
 
 import Control.Monad.Except as Except
 import Data.DateTime (DateTime)
+import Data.DateTime as DateTime
+import Data.Formatter.DateTime as Formatter.DateTime
+import Data.HTTP.Method (Method(..))
+import Data.Time.Duration as Duration
 import Foreign.Git as Git
-import Foreign.GitHub (Address, GitHubToken(..), IssueNumber(..), Octokit, RateLimit, Tag, Team)
+import Foreign.GitHub (Address, GitHubError(..), GitHubToken(..), IssueNumber, Octokit, Request, Tag, Team)
 import Foreign.GitHub as GitHub
+import Foreign.Object as Object
 import Node.Path as Path
+import Registry.App.Json as Json
+import Registry.App.RegistryCache (RegistryCache(..))
+import Registry.App.RegistryCache as App.RegistryCache
 import Registry.Constants as Constants
+import Registry.Effect.Cache (CACHE)
 import Registry.Effect.Log (LOG)
 import Registry.Effect.Log as Log
 import Registry.ManifestIndex as ManifestIndex
@@ -21,12 +50,11 @@ import Run as Run
 import Type.Proxy (Proxy(..))
 
 data GitHub a
-  = ListTags Address (Array Tag -> a)
-  | ListTeamMembers Team (Array String -> a)
-  | GetContent Address String FilePath (String -> a)
-  | GetRefCommit Address String (String -> a)
-  | GetCommitDate Address String (DateTime -> a)
-  | GetRateLimit (RateLimit -> a)
+  = ListTags Address (Either GitHubError (Array Tag) -> a)
+  | ListTeamMembers Team (Either GitHubError (Array String) -> a)
+  | GetContent Address String FilePath (Either GitHubError String -> a)
+  | GetRefCommit Address String (Either GitHubError String -> a)
+  | GetCommitDate Address String (Either GitHubError DateTime -> a)
 
 derive instance Functor GitHub
 
@@ -36,20 +64,57 @@ type GITHUB r = (github :: GitHub | r)
 _github :: Proxy "github"
 _github = Proxy
 
-listTags :: forall r. Address -> Run (GITHUB + r) (Array Tag)
+listTags :: forall r. Address -> Run (GITHUB + r) (Either GitHubError (Array Tag))
 listTags address = Run.lift _github (ListTags address identity)
 
-listTeamMembers :: forall r. Team -> Run (GITHUB + r) (Array String)
+-- | List the members of the provided team. Requires that the authorization on
+-- | the request has read rights for the given organization and team.
+listTeamMembers :: forall r. Team -> Run (GITHUB + r) (Either GitHubError (Array String))
 listTeamMembers team = Run.lift _github (ListTeamMembers team identity)
 
-getContent :: forall r. Address -> String -> FilePath -> Run (GITHUB + r) String
+getContent :: forall r. Address -> String -> FilePath -> Run (GITHUB + r) (Either GitHubError String)
 getContent address ref path = Run.lift _github (GetContent address ref path identity)
 
-getRefCommit :: forall r. Address -> String -> Run (GITHUB + r) String
+getRefCommit :: forall r. Address -> String -> Run (GITHUB + r) (Either GitHubError String)
 getRefCommit address ref = Run.lift _github (GetRefCommit address ref identity)
 
-getCommitDate :: forall r. Address -> String -> Run (GITHUB + r) DateTime
+getCommitDate :: forall r. Address -> String -> Run (GITHUB + r) (Either GitHubError DateTime)
 getCommitDate address ref = Run.lift _github (GetCommitDate address ref identity)
+
+-- | An effectful handler for the GITHUB effect which makes calls to GitHub
+-- | using Octokit.
+handleGitHubAff :: forall r a. Octokit -> GitHub a -> Run (CACHE RegistryCache + LOG + AFF + r) a
+handleGitHubAff octokit = case _ of
+  ListTags address reply -> do
+    Log.debug $ "Listing tags for " <> show address
+    result <- request octokit (GitHub.listTags address)
+    pure $ reply result
+
+  ListTeamMembers team reply -> do
+    Log.debug $ "Listing members of team " <> show team
+    result <- request octokit (GitHub.listTeamMembers team)
+    pure $ reply $ map (map _.login) result
+
+  GetContent address ref path reply -> do
+    Log.debug $ "Fetching content from " <> show address <> " at ref " <> ref <> " at path " <> path
+    request octokit (GitHub.getContent address ref path) >>= case _ of
+      Left error -> pure $ reply $ Left error
+      Right result -> case GitHub.decodeBase64String result of
+        Left base64Error -> do
+          Log.debug $ "Failed to decode base64-encoded file: " <> base64Error
+          pure $ reply $ Left $ DecodeError base64Error
+        Right decoded ->
+          pure $ reply $ Right decoded
+
+  GetRefCommit address ref reply -> do
+    Log.debug $ "Fetching commit associated with ref " <> ref <> " on repository " <> show address
+    result <- request octokit (GitHub.getRefCommit address ref)
+    pure $ reply result
+
+  GetCommitDate address ref reply -> do
+    Log.debug $ "Fetching commit date associated with ref " <> ref <> " on repository " <> show address
+    result <- request octokit (GitHub.getCommitDate address ref)
+    pure $ reply result
 
 data RegistryRepo a
   = CloseIssue a
@@ -115,19 +180,16 @@ type RegistryGitHubEnv =
 -- | Handle the registry repo effect by closing issues and committing to the
 -- | /registry and /registry-index repositories. Requires the Pacchettibotti
 -- | auth token.
-handleRegistryRepoGitHub :: forall r a. RegistryGitHubEnv -> RegistryRepo a -> Run (AFF + LOG + r) a
+handleRegistryRepoGitHub :: forall r a. RegistryGitHubEnv -> RegistryRepo a -> Run (CACHE RegistryCache + AFF + LOG + r) a
 handleRegistryRepoGitHub { octokit, issue, pacchettibotti, registryPath, registryIndexPath } = case _ of
   CloseIssue next -> do
-    pure next
-  {-
-  Run.liftAff (Except.runExceptT (GitHub.closeIssue Constants.registry octokit issue)) >>= case _ of
-    Left githubError -> do
-      Log.error $ "Could not close GitHub issue: " <> GitHub.printGitHubError githubError
-      pure next
-    Right _ -> do
-      Log.debug $ "Closed GitHub issue #" <> show (un IssueNumber issue)
-      pure next
-  -}
+    request octokit (GitHub.closeIssue Constants.registry issue) >>= case _ of
+      Left githubError -> do
+        Log.error $ "Could not close GitHub issue: " <> GitHub.printGitHubError githubError
+        pure next
+      Right _ -> do
+        Log.debug $ "Closed GitHub issue #" <> show (un GitHub.IssueNumber issue)
+        pure next
 
   CommitMetadata name next -> do
     let nameString = PackageName.print name
@@ -189,107 +251,90 @@ handleRegistryRepoGitHub { octokit, issue, pacchettibotti, registryPath, registr
     runGit_ [ "add", path ]
     runGit_ [ "commit", "-m", message ]
 
--- -- | Apply exponential backoff to requests that hang, but without cancelling
--- -- | requests if we have reached our rate limit and have been throttled.
--- rateLimitBackoff :: forall a. Octokit -> Aff (Either GitHubError a) -> Aff (Either GitHubError a)
--- rateLimitBackoff octokit action = do
---   maybeResult <- withBackoff
---     { delay: Aff.Milliseconds 5_000.0
---     , action
---     , shouldCancel: \_ -> request octokit getRateLimit >>= case _ of
---         Right { remaining } | remaining == 0 -> pure false
---         _ -> pure true
---     , shouldRetry: \attempt -> if attempt <= 3 then pure (Just action) else pure Nothing
---     }
---   pure $ case maybeResult of
---     Nothing -> Left $ APIError { statusCode: 400, message: "Unable to reach GitHub servers." }
---     Just result -> Right result
+-- | Apply exponential backoff to requests that hang, but without cancelling
+-- | requests if we have reached our rate limit and have been throttled.
+requestWithBackoff :: forall a r. Octokit -> Request a -> Run (LOG + AFF + r) (Either GitHubError a)
+requestWithBackoff octokit githubRequest = do
+  Log.debug $ "Making request to " <> GitHub.printRoute githubRequest.route
+  let action = GitHub.request octokit githubRequest
+  result <- Run.liftAff $ withBackoff
+    { delay: Duration.Milliseconds 5_000.0
+    , action
+    , shouldCancel: \_ -> GitHub.request octokit GitHub.getRateLimit >>= case _ of
+        Right { remaining } | remaining == 0 -> pure false
+        _ -> pure true
+    , shouldRetry: \attempt -> if attempt <= 3 then pure (Just action) else pure Nothing
+    }
+  case result of
+    Nothing -> pure $ Left $ GitHub.APIError { statusCode: 400, message: "Unable to reach GitHub servers." }
+    Just accepted -> pure accepted
 
--- -- TODO: Migrate into the GITHUB module.
--- --
--- -- | A helper function for implementing GET requests to the GitHub API that
--- -- | relies on the GitHub API to report whether there is any new data, and falls
--- -- | back to the cache if there is not. Should only be used on GET requests; for
--- -- | POST requests, use `request`.
--- cachedRequest
---   :: forall args
---    . (UncachedRequestArgs args -> ExceptT GitHubAPIError Aff Json)
---   -> UncachedRequestArgs args
---   -> { cache :: Cache, checkGitHub :: Boolean }
---   -> ExceptT GitHubAPIError Aff Json
--- cachedRequest runRequest requestArgs@{ route: Route route } { cache, checkGitHub } = do
---   let codec = CA.Common.either githubApiErrorCodec CA.json
---   entry <- liftEffect (Cache.readJsonEntry codec route cache)
---   now <- liftEffect nowUTC
---   ExceptT $ case entry of
---     Left _ -> do
---       Console.log $ "CACHE MISS: Malformed or no entry for " <> route
---       result <- Except.runExceptT $ runRequest requestArgs
---       liftEffect $ Cache.writeJsonEntry codec route result cache
---       pure result
+-- | A helper function for implementing GET requests to the GitHub API that
+-- | relies on the GitHub API to report whether there is any new data, and falls
+-- | back to the cache if there is not.
+request :: forall r a. GitHub.Octokit -> GitHub.Request a -> Run (CACHE RegistryCache + LOG + AFF + r) (Either GitHubError a)
+request octokit githubRequest@{ route, codec } = do
+  -- We cache GET requests, other than requests to fetch the current rate limit.
+  case GitHub.routeMethod route of
+    GET | route /= GitHub.getRateLimit.route -> do
+      entry <- App.RegistryCache.get (GitHubRequest route)
+      now <- Run.liftAff $ liftEffect nowUTC
+      case entry of
+        Nothing -> do
+          Log.debug $ "No cache entry for route " <> GitHub.printRoute route
+          result <- requestWithBackoff octokit githubRequest
+          App.RegistryCache.put (GitHubRequest route) (map (Json.encode codec) result)
+          pure result
 
---     Right cached -> case cached.value of
---       Left err
---         -- We don't retry 404 errors because they indicate a missing resource.
---         | err.statusCode == 404 -> pure $ Left err
---         -- Otherwise, if we have an error in cache, we retry the request; we
---         -- don't have anything usable we could return.
---         | otherwise -> do
---             Console.log $ "CACHE ERROR: Deleting non-404 error entry and retrying " <> route
---             Console.logShow err
---             liftEffect $ cache.remove route
---             Except.runExceptT $ cachedRequest runRequest requestArgs { cache, checkGitHub }
+        Just cached -> case cached.value of
+          Left (GitHub.APIError err)
+            -- We don't retry 404 errors because they indicate a missing resource.
+            | err.statusCode == 404 -> do
+                Log.debug "Cached entry is a 404 error, not retrying..."
+                pure $ Left $ GitHub.APIError err
+            -- Otherwise, if we have an error in cache, we retry the request; we
+            -- don't have anything usable we could return.
+            | otherwise -> do
+                Log.debug $ "Retrying route " <> GitHub.printRoute route <> " because cache contains non-404 error: " <> show err
+                App.RegistryCache.delete (GitHubRequest route)
+                request octokit githubRequest
 
---       -- If we do have a usable cache value, then we will defer to GitHub's
---       -- judgment on whether to use it or not. We do that by making a request
---       -- with the 'If-Not-Modified' header. A 304 response means the resource
---       -- has not changed, and GitHub promises not to consume a request if so.
---       --
---       -- Unfortunately, GitHub is not currently (2022-07-01) honoring this
---       -- promise, so we (temporarily) only retry after N hours have passed. Once
---       -- they start honoring the promise again we can remove the modified time
---       -- guard below.
---       --
---       -- TODO: Remove DateTime.diff when GitHub honors requests again.
---       Right payload
---         | checkGitHub, DateTime.diff now cached.modified >= Duration.Hours 1.0 -> do
---             Console.log $ "CACHE EXPIRED: " <> route
---             let _gitHubTime = Formatter.DateTime.format formatRFC1123 cached.modified
---             result <- Except.runExceptT $ runRequest $ requestArgs
---             {- TODO: Re-enable when GitHub honors requests again.
---             result <- Except.runExceptT $ runRequest $ requestArgs
---               { headers = Object.insert "If-Modified-Since" gitHubTime requestArgs.headers }
---             -}
---             case result of
---               -- A 304 response means the resource has not changed and we should
---               -- return from cache.
---               Left err | err.statusCode == 304 -> do
---                 pure $ Right payload
---               _ -> do
---                 liftEffect $ Cache.writeJsonEntry codec route result cache
---                 pure result
---         | otherwise ->
---             pure $ Right payload
+          Left otherError -> do
+            Log.debug "Cached entry is an unknown or decode error, not retrying..."
+            pure (Left otherError)
 
--- -- GitHub uses the RFC1123 time format: "Thu, 05 Jul 2022"
--- -- http://www.csgnetwork.com/timerfc1123calc.html
--- --
--- -- It expects the time to be in UTC.
--- formatRFC1123 :: Formatter
--- formatRFC1123 = List.fromFoldable
---   [ DayOfWeekNameShort
---   , Placeholder ", "
---   , DayOfMonthTwoDigits
---   , Placeholder " "
---   , MonthShort
---   , Placeholder " "
---   , YearFull
---   , Placeholder " "
---   , Hours24
---   , Placeholder ":"
---   , MinutesTwoDigits
---   , Placeholder ":"
---   , SecondsTwoDigits
---   , Placeholder " "
---   , Placeholder "UTC"
---   ]
+          -- If we do have a usable cache value, then we will defer to GitHub's
+          -- judgment on whether to use it or not. We do that by making a request
+          -- with the 'If-Not-Modified' header. A 304 response means the resource
+          -- has not changed, and GitHub promises not to consume a request if so.
+          --
+          -- Unfortunately, GitHub is not currently (2022-07-01) honoring this
+          -- promise, so we (temporarily) only retry after N hours have passed. Once
+          -- they start honoring the promise again we can remove the modified time
+          -- guard below.
+          --
+          -- TODO: Remove DateTime.diff when GitHub honors requests again.
+          Right _ | DateTime.diff now cached.modified >= Duration.Hours 1.0 -> do
+            Log.debug $ "Cache entry expired for route " <> GitHub.printRoute route <> ", requesting..."
+            -- This is how we *would* modify the request, once GitHub works.
+            let _githubTime = Formatter.DateTime.format GitHub.formatRFC1123 cached.modified
+            let _modifiedRequest = githubRequest { headers = Object.insert "If-Modified-Since" _githubTime githubRequest.headers }
+            result <- requestWithBackoff octokit githubRequest
+            case result of
+              Left (GitHub.APIError err) | err.statusCode == 304 -> do
+                Log.debug $ "Received confirmation of cache validity response from GitHub, reading cache value..."
+                pure result
+              _ -> do
+                App.RegistryCache.put (GitHubRequest route) (map (Json.encode codec) result)
+                pure result
+
+          Right value -> case Json.decode codec value of
+            Left error -> do
+              Log.debug $ "Unable to decode cache entry, returning error..."
+              pure $ Left $ GitHub.DecodeError $ Json.printJsonDecodeError error
+            Right accepted ->
+              pure $ Right accepted
+
+    _ -> do
+      Log.debug $ "Not a cacheable route: " <> GitHub.printRoute route <> ", requesting..."
+      requestWithBackoff octokit githubRequest
