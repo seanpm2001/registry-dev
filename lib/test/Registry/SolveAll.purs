@@ -4,11 +4,14 @@ import Registry.Prelude
 
 import Control.Monad.Except as Except
 import Data.Array as Array
+import Data.DateTime.Instant as Instant
 import Data.Foldable (foldMap)
 import Data.Map as Map
 import Data.Newtype (unwrap)
 import Data.String as String
+import Data.Time.Duration (Milliseconds(..))
 import Effect.Console (time, timeEnd)
+import Effect.Now (now)
 import Effect.Unsafe (unsafePerformEffect)
 import Foreign.Git as Git
 import Node.FS.Aff (readTextFile)
@@ -225,8 +228,13 @@ main = launchAff_ do
   where
   test registry package version deps = do
     log $ "%%% Solving " <> show package <> "@" <> show version <> " %%%"
-    case Solver.solve registry deps of
+    t0 <- liftEffect now
+    let r = Solver.solve registry deps
+    t1 <- liftEffect now
+    let Milliseconds d = Instant.diff t1 t0
+    log $ "Took: " <> show d <> "ms"
+    case r of
       Right _ -> pure unit
       Left es -> do
         log $ "Failed: " <> show package <> "@" <> show version
-        log $ foldMap Solver.printSolverError es
+        log $ String.take 5000 $ foldMap Solver.printSolverError es
